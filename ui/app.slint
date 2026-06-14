@@ -143,11 +143,15 @@ export component AppWindow inherits Window {
     callback set-term-bg-opacity(float);           // 设置背景图透明度
     callback pick-bg-image();                      // 打开文件选择器
     callback clear-bg-image();                     // 清除背景图
+    in-out property <string> term-bg-hex-input: ""; // 背景色 hex 输入框文本
+    callback set-term-bg-color-hex(string);        // 设置自定义背景色（hex 字符串）
 
     // 终端字体颜色自定义
     in-out property <brush> term-fg-override <=> Theme.term-fg-override;  // 自定义字体颜色
     in property <[brush]> fg-color-presets;        // 预设字体颜色列表
     callback set-term-fg-color(int);               // 设置自定义字体颜色（索引，-1=默认）
+    in-out property <string> term-fg-hex-input: ""; // 字体颜色 hex 输入框文本
+    callback set-term-fg-color-hex(string);        // 设置自定义字体颜色（hex 字符串）
     in-out property <bool> interface-open: false;  // Interface settings dialog
     // Interface dialog position (draggable by its title bar); init centered.
     property <length> ifd-x: (root.width - 644px) / 2;
@@ -1407,7 +1411,6 @@ export component AppWindow inherits Window {
                 ge-input := LineEdit {
                     text <=> root.group-dialog-name;
                     font-family: Theme.ui-font-family; // CJK-capable (#54)
-                    placeholder-text: @tr("Group name");
                     // Enter confirms when non-empty.
                     accepted => {
                         if (root.group-dialog-name != "") {
@@ -1488,7 +1491,6 @@ export component AppWindow inherits Window {
                 qcm-name-in := LineEdit {
                     text <=> root.qcm-name;
                     font-family: Theme.ui-font-family;
-                    placeholder-text: @tr("e.g. tail log");
                 }
                 Text { text: @tr("Command"); color: Theme.text-secondary; font-size: Theme.fs-sm; }
                 HorizontalLayout {
@@ -1497,7 +1499,6 @@ export component AppWindow inherits Window {
                         horizontal-stretch: 1;
                         text <=> root.qcm-command;
                         font-family: Theme.ui-font-family;
-                        placeholder-text: "tail -f /var/log/syslog";
                         accepted => {
                             if (root.qcm-name != "" && root.qcm-command != "") {
                                 root.add-quick-command(root.qcm-name, root.qcm-command);
@@ -1611,7 +1612,6 @@ export component AppWindow inherits Window {
                 sp-input := LineEdit {
                     text <=> root.sftp-prompt-value;
                     font-family: Theme.ui-font-family; // CJK-capable (#54)
-                    placeholder-text: root.sftp-prompt-kind == "chmod" ? "755" : "";
                     accepted => {
                         if (root.sftp-prompt-value != "") {
                             root.sftp-prompt-submit(
@@ -2118,7 +2118,7 @@ export component AppWindow inherits Window {
                             spacing: 16px;
                             alignment: start;
 
-                            // 预设背景色
+                            // 预设背景色 + hex 输入
                             VerticalLayout {
                                 spacing: 6px;
                                 Text {
@@ -2126,6 +2126,7 @@ export component AppWindow inherits Window {
                                     color: Theme.text-secondary;
                                     font-size: Theme.fs-sm;
                                 }
+                                // 预设色块行
                                 HorizontalLayout {
                                     spacing: 6px;
                                     // 默认色按钮
@@ -2151,6 +2152,41 @@ export component AppWindow inherits Window {
                                             mouse-cursor: pointer;
                                             clicked => { root.set-term-bg-color(i); }
                                         }
+                                    }
+                                    Rectangle { horizontal-stretch: 1; }
+                                }
+                                // hex 输入行：输入框 + 预览 + 应用按钮
+                                HorizontalLayout {
+                                    spacing: 6px;
+                                    // hex 输入框
+                                    Rectangle {
+                                        width: 120px; height: 26px;
+                                        border-radius: Theme.radius-sm;
+                                        border-width: 1px;
+                                        border-color: Theme.border-subtle;
+                                        background: Theme.bg-elevated;
+                                        TextInput {
+                                            x: 6px; y: 0;
+                                            width: parent.width - 12px;
+                                            height: parent.height;
+                                            vertical-alignment: center;
+                                            color: Theme.text-primary;
+                                            font-size: Theme.fs-sm;
+                                            font-family: "monospace";
+                                            text <=> root.term-bg-hex-input;
+                                            // 实时预览：每输入一个字符都更新预览色
+                                            edited => { root.set-term-bg-color-hex(root.term-bg-hex-input); }
+                                            // 按回车正式应用
+                                            accepted => { root.set-term-bg-color-hex(root.term-bg-hex-input); }
+                                        }
+                                    }
+                                    // 预览色块
+                                    Rectangle {
+                                        width: 26px; height: 26px;
+                                        border-radius: 4px;
+                                        border-width: 1px;
+                                        border-color: Theme.border-subtle;
+                                        background: root.term-bg-override;
                                     }
                                     Rectangle { horizontal-stretch: 1; }
                                 }
@@ -2289,7 +2325,68 @@ export component AppWindow inherits Window {
                                 }
                             }
 
-                            // 字体颜色
+                            // 字体大小控制（+/- 按钮，与透明度相同模式）
+                            VerticalLayout {
+                                spacing: 6px;
+                                Text {
+                                    text: root.lang-en ? "Font Size" : "字体大小";
+                                    color: Theme.text-secondary;
+                                    font-size: Theme.fs-sm;
+                                }
+                                HorizontalLayout {
+                                    spacing: 8px;
+                                    // 减小字号
+                                    Rectangle {
+                                        width: 28px; height: 28px;
+                                        border-radius: Theme.radius-sm;
+                                        border-width: 1px;
+                                        border-color: Theme.border-subtle;
+                                        background: fs-minus-ta.has-hover ? Theme.bg-hover : Theme.bg-elevated;
+                                        fs-minus-ta := TouchArea {
+                                            mouse-cursor: pointer;
+                                            clicked => { root.set-term-font-size(Math.max(8, Math.round(root.term-font-size / 1px) - 1)); }
+                                        }
+                                        Text {
+                                            text: "−";
+                                            color: Theme.text-primary;
+                                            font-size: Theme.fs-md;
+                                            horizontal-alignment: center;
+                                            vertical-alignment: center;
+                                        }
+                                    }
+                                    // 当前字号
+                                    Text {
+                                        text: Math.round(root.term-font-size / 1px) + " px";
+                                        color: Theme.text-muted;
+                                        font-size: Theme.fs-sm;
+                                        vertical-alignment: center;
+                                        width: 50px;
+                                        horizontal-alignment: center;
+                                    }
+                                    // 增大字号
+                                    Rectangle {
+                                        width: 28px; height: 28px;
+                                        border-radius: Theme.radius-sm;
+                                        border-width: 1px;
+                                        border-color: Theme.border-subtle;
+                                        background: fs-plus-ta.has-hover ? Theme.bg-hover : Theme.bg-elevated;
+                                        fs-plus-ta := TouchArea {
+                                            mouse-cursor: pointer;
+                                            clicked => { root.set-term-font-size(Math.min(32, Math.round(root.term-font-size / 1px) + 1)); }
+                                        }
+                                        Text {
+                                            text: "+";
+                                            color: Theme.text-primary;
+                                            font-size: Theme.fs-md;
+                                            horizontal-alignment: center;
+                                            vertical-alignment: center;
+                                        }
+                                    }
+                                    Rectangle { horizontal-stretch: 1; }
+                                }
+                            }
+
+                            // 字体颜色 + hex 输入
                             VerticalLayout {
                                 spacing: 6px;
                                 Text {
@@ -2297,6 +2394,7 @@ export component AppWindow inherits Window {
                                     color: Theme.text-secondary;
                                     font-size: Theme.fs-sm;
                                 }
+                                // 预设色块行
                                 HorizontalLayout {
                                     spacing: 6px;
                                     // 默认色按钮
@@ -2322,6 +2420,41 @@ export component AppWindow inherits Window {
                                             mouse-cursor: pointer;
                                             clicked => { root.set-term-fg-color(i); }
                                         }
+                                    }
+                                    Rectangle { horizontal-stretch: 1; }
+                                }
+                                // hex 输入行：输入框 + 预览 + 应用按钮
+                                HorizontalLayout {
+                                    spacing: 6px;
+                                    // hex 输入框
+                                    Rectangle {
+                                        width: 120px; height: 26px;
+                                        border-radius: Theme.radius-sm;
+                                        border-width: 1px;
+                                        border-color: Theme.border-subtle;
+                                        background: Theme.bg-elevated;
+                                        TextInput {
+                                            x: 6px; y: 0;
+                                            width: parent.width - 12px;
+                                            height: parent.height;
+                                            vertical-alignment: center;
+                                            color: Theme.text-primary;
+                                            font-size: Theme.fs-sm;
+                                            font-family: "monospace";
+                                            text <=> root.term-fg-hex-input;
+                                            // 实时预览：每输入一个字符都更新预览色
+                                            edited => { root.set-term-fg-color-hex(root.term-fg-hex-input); }
+                                            // 按回车正式应用
+                                            accepted => { root.set-term-fg-color-hex(root.term-fg-hex-input); }
+                                        }
+                                    }
+                                    // 预览色块
+                                    Rectangle {
+                                        width: 26px; height: 26px;
+                                        border-radius: 4px;
+                                        border-width: 1px;
+                                        border-color: Theme.border-subtle;
+                                        background: root.term-fg-override;
                                     }
                                     Rectangle { horizontal-stretch: 1; }
                                 }

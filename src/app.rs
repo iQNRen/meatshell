@@ -299,6 +299,7 @@ pub fn run() -> Result<()> {
             if let Some(c) = parse_hex_color(bg_color) {
                 window.set_term_bg_override(c.into());
             }
+            window.set_term_bg_hex_input(bg_color.into());  // 初始化 hex 输入框
         }
         // 背景图片
         let bg_image = s.term_bg_image();
@@ -322,6 +323,7 @@ pub fn run() -> Result<()> {
                     theme.fg_override = Some(c);
                 }
             }
+            window.set_term_fg_hex_input(fg_color.into());  // 初始化 hex 输入框
         }
     }
 
@@ -527,6 +529,60 @@ pub fn run() -> Result<()> {
                 let _ = s.save();
             }
             // 同步到全局 THEME_OVERRIDE，让终端渲染使用新颜色
+            if let Ok(mut theme) = THEME_OVERRIDE.lock() {
+                theme.fg_override = color_opt;
+            }
+            if let Some(w) = weak.upgrade() {
+                w.set_term_fg_override(brush);
+            }
+        });
+    }
+    // 自定义背景色（hex 字符串输入）
+    {
+        let weak = window.as_weak();
+        let store = store.clone();
+        window.on_set_term_bg_color_hex(move |hex: SharedString| {
+            let hex_str = hex.to_string();
+            let color_opt = parse_hex_color(&hex_str);
+            let brush = match color_opt {
+                Some(c) => c.into(),
+                None => slint::Brush::default(),
+            };
+            {
+                let mut s = store.borrow_mut();
+                if color_opt.is_some() {
+                    s.set_term_bg_color(hex_str);
+                } else {
+                    s.set_term_bg_color(String::new());
+                }
+                let _ = s.save();
+            }
+            if let Some(w) = weak.upgrade() {
+                w.set_term_bg_override(brush);
+            }
+        });
+    }
+    // 自定义字体颜色（hex 字符串输入）
+    {
+        let weak = window.as_weak();
+        let store = store.clone();
+        window.on_set_term_fg_color_hex(move |hex: SharedString| {
+            let hex_str = hex.to_string();
+            let color_opt = parse_hex_color(&hex_str);
+            let brush = match color_opt {
+                Some(c) => c.into(),
+                None => slint::Brush::default(),
+            };
+            {
+                let mut s = store.borrow_mut();
+                if color_opt.is_some() {
+                    s.set_term_fg_color(hex_str);
+                } else {
+                    s.set_term_fg_color(String::new());
+                }
+                let _ = s.save();
+            }
+            // 同步到全局 THEME_OVERRIDE
             if let Ok(mut theme) = THEME_OVERRIDE.lock() {
                 theme.fg_override = color_opt;
             }
