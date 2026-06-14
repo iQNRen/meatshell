@@ -256,38 +256,34 @@ export component Sidebar inherits Rectangle {
                     font-weight: 600;
                 }
             }
-            Text {
-                text: connection-state;
-                color: Theme.text-secondary;
-                font-size: Theme.fs-sm;
-                overflow: elide;  // 长地址省略号
-            }
-            // 连接信息可点击复制（仅已连接时有内容）
-            if root.conn-state == 1 : Rectangle {
-                height: 20px;
-                border-radius: Theme.radius-sm;
-                background: conn-touch.has-hover ? Theme.bg-hover : transparent;
-                HorizontalLayout {
-                    padding-left: 0px; padding-right: 4px;
-                    spacing: 3px;
+            HorizontalLayout {
+                spacing: 6px;
+                Text {
+                    text: connection-state;
+                    color: Theme.text-secondary;
+                    font-size: Theme.fs-sm;
+                    overflow: elide;
+                    horizontal-stretch: 1;
+                    vertical-alignment: center;
+                }
+                // 复制图标，点击复制连接地址
+                if root.conn-state == 1 : Rectangle {
+                    width: 20px;
+                    height: 18px;
+                    border-radius: Theme.radius-sm;
+                    background: conn-touch.has-hover ? Theme.bg-hover : transparent;
                     Text {
-                        // content_copy 图标
                         text: "\u{E157}";
                         font-family: "Material Icons";
                         color: conn-touch.has-hover ? Theme.accent : Theme.text-muted;
                         font-size: 13px;
                         vertical-alignment: center;
+                        horizontal-alignment: center;
                     }
-                    Text {
-                        text: @tr("Copy address");
-                        color: conn-touch.has-hover ? Theme.accent : Theme.text-muted;
-                        font-size: Theme.fs-xs;
-                        vertical-alignment: center;
+                    conn-touch := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.copy-text(root.connection-state); }
                     }
-                }
-                conn-touch := TouchArea {
-                    mouse-cursor: pointer;
-                    clicked => { root.copy-text(root.connection-state); }
                 }
             }
         }

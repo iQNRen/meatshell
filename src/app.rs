@@ -2308,7 +2308,7 @@ fn apply_session_event_to_window(
         }
         SessionEvent::Connected => {
             update_tab(&|t| t.connected = true);
-            update_terminal(&|t| t.status = crate::i18n::t("已连接", "Connected").into());
+            update_terminal(&|t| t.status = "".into());  // 连接状态已在侧边栏显示，不再重复
             if let Some(st) = statuses.lock().unwrap().get_mut(tab_id) {
                 st.state = 1;
             }
