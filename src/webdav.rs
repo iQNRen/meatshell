@@ -122,6 +122,8 @@ pub async fn upload(settings: &WebDavSettings) -> Result<String> {
         .with_context(|| format!("failed to read {}", config_path.display()))?;
     let checksum = sha256_hex(&data);
     let client = build_client()?;
+    // Ensure remote directory exists (MKCOL, ignore 405 = already exists)
+    let _ = create_collection(settings).await;
     let url = remote_url(&settings.base_url, REMOTE_FILE);
     let resp = client
         .put(&url)
