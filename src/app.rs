@@ -515,6 +515,7 @@ pub fn run() -> Result<()> {
         ];
         let weak = window.as_weak();
         let store = store.clone();
+        let bufs_preset = bufs.clone();  // 克隆终端缓冲区引用
         window.on_set_term_fg_color(move |idx: i32| {
             let (hex, brush, color_opt) = if idx < 0 || idx as usize >= preset_colors.len() {
                 ("".to_string(), slint::Brush::default(), None)
@@ -534,6 +535,14 @@ pub fn run() -> Result<()> {
             }
             if let Some(w) = weak.upgrade() {
                 w.set_term_fg_override(brush);
+                // 重新渲染所有终端，让字体颜色立即生效
+                let tab_ids: Vec<String> = {
+                    let map = bufs_preset.lock().unwrap();
+                    map.keys().cloned().collect()
+                };
+                for tid in tab_ids {
+                    rebuild_tab_display(&w, &bufs_preset, &tid);
+                }
             }
         });
     }
@@ -563,6 +572,7 @@ pub fn run() -> Result<()> {
     {
         let weak = window.as_weak();
         let store = store.clone();
+        let bufs_fg = bufs.clone();  // 克隆终端缓冲区引用，用于重新渲染
         window.on_set_term_fg_color_hex(move |hex: SharedString| {
             let hex_str = hex.to_string();
             let color_opt = parse_hex_color(&hex_str);
@@ -580,6 +590,14 @@ pub fn run() -> Result<()> {
                 }
                 if let Some(w) = weak.upgrade() {
                     w.set_term_fg_override(brush);
+                    // 重新渲染所有终端，让字体颜色立即生效
+                    let tab_ids: Vec<String> = {
+                        let map = bufs_fg.lock().unwrap();
+                        map.keys().cloned().collect()
+                    };
+                    for tid in tab_ids {
+                        rebuild_tab_display(&w, &bufs_fg, &tid);
+                    }
                 }
             }
             // 无效输入时不操作，保持上次有效颜色
