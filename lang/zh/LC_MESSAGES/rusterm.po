@@ -318,8 +318,8 @@ msgstr "-R：服务器端口 → 由本机访问的目标"
 msgid "-D: local SOCKS5 proxy"
 msgstr "-D：本地 SOCKS5 代理"
 
-msgid "rusterm — a lightweight Rust + Slint SSH client by 'lil meatball'"
-msgstr "rusterm 一个由「一坨肉」开发的轻量 Rust + Slint SSH 客户端"
+msgid "rusterm — a Rust + Slint SSH client by 'lil meatball'"
+msgstr "rusterm 一个轻量 Rust + Slint SSH 客户端"
 
 msgid "Quick connect"
 msgstr "快速连接"

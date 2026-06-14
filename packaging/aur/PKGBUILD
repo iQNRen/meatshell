@@ -7,7 +7,7 @@
 pkgname=rusterm-bin
 pkgver=0.3.6
 pkgrel=1
-pkgdesc="Lightweight FinalShell-style SSH/SFTP/terminal client (Rust + Slint)"
+pkgdesc="FinalShell-style SSH/SFTP/terminal client (Rust + Slint)"
 arch=('x86_64' 'aarch64')
 url="https://github.com/iqnren/rusterm"
 license=('MIT' 'Apache-2.0')

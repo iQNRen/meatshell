@@ -21,7 +21,7 @@
 
         <Package Id="*"
             Keywords="Installer"
-            Description="rusterm - lightweight Rust + Slint SSH/terminal client"
+            Description="rusterm - Rust + Slint SSH/terminal client"
             Manufacturer="rusterm contributors"
             InstallerVersion="450"
             Languages="1033"
@@ -56,7 +56,7 @@
                 <Component Id="ApplicationShortcut" Guid="*">
                     <Shortcut Id="StartMenuShortcut"
                         Name="rusterm"
-                        Description="Lightweight SSH/terminal client"
+                        Description="SSH/terminal client"
                         Target="[APPLICATIONFOLDER]rusterm.exe"
                         WorkingDirectory="APPLICATIONFOLDER"
                         Icon="ProductICO"/>

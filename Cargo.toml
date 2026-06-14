@@ -3,7 +3,7 @@ name = "rusterm"
 version = "0.4.3"
 edition = "2021"
 authors = ["rusterm contributors"]
-description = "A lightweight FinalShell-style SSH/terminal client written in Rust + Slint"
+description = "A FinalShell-style SSH/terminal client written in Rust + Slint"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/your/rusterm"
 readme = "README.md"
@@ -55,7 +55,7 @@ chacha20poly1305 = "0.10"
 # Detect whether the OS is running in dark or light mode.
 # Used on startup to honour the system preference before the user overrides it.
 dark-light = "1"
-# Lightweight synchronous HTTPS client (bundled rustls, no OpenSSL) for the
+# synchronous HTTPS client (bundled rustls, no OpenSSL) for the
 # in-app update check against the GitHub releases API (#48). Runs on a
 # background thread so it never blocks startup; failure is silently ignored.
 ureq = { version = "2", features = ["tls"] }

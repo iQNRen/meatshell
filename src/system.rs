@@ -1,4 +1,4 @@
-//! Lightweight poller for local machine stats (CPU / memory / network).
+//! poller for local machine stats (CPU / memory / network).
 //!
 //! `sysinfo` is already a dependency for many Rust desktop apps; it gives us
 //! cross-platform data with ~2% CPU overhead at 1-second cadence.

@@ -806,7 +806,7 @@ export component AppWindow inherits Window {
                                        horizontal-alignment: center; vertical-alignment: center; }
                             }
                             Rectangle {
-                                width: 28px; height: 28px;
+                                width: 22px; height: 22px;
                                 border-radius: Theme.radius-sm;
                                 background: ed-close-ta.has-hover ? Theme.bg-hover : transparent;
                                 ed-close-ta := TouchArea {
@@ -1155,7 +1155,7 @@ export component AppWindow inherits Window {
             HorizontalLayout {
                 padding-left: 6px;
                 padding-right: 6px;
-                spacing: 6px;
+                spacing: 4px;
                 Text { text: "PID"; width: 52px; color: Theme.text-muted; font-size: Theme.fs-xs; }
                 Text { text: @tr("User"); width: 80px; color: Theme.text-muted; font-size: Theme.fs-xs; }
                 Text { text: "CPU%"; width: 48px; color: Theme.text-muted; font-size: Theme.fs-xs;
@@ -1195,7 +1195,7 @@ export component AppWindow inherits Window {
                         HorizontalLayout {
                             padding-left: 6px;
                             padding-right: 6px;
-                            spacing: 6px;
+                            spacing: 4px;
                             Text { text: p.pid; width: 52px; color: Theme.text-secondary;
                                    font-size: Theme.fs-xs; vertical-alignment: center; }
                             Text { text: p.user; width: 80px; color: Theme.text-secondary;
@@ -1536,7 +1536,7 @@ export component AppWindow inherits Window {
                             border-radius: Theme.radius-sm;
                             background: Theme.bg-root;
                             HorizontalLayout {
-                                padding-left: 8px; padding-right: 6px; spacing: 6px;
+                                padding-left: 8px; padding-right: 6px; spacing: 4px;
                                 VerticalLayout {
                                     horizontal-stretch: 1;
                                     alignment: center;
@@ -1859,11 +1859,11 @@ export component AppWindow inherits Window {
                 }
                 Rectangle { height: 1px; background: Theme.border-subtle; }
 
-                // Left nav (27%) + right content (73%)
+                // Left nav (固定宽度) + right content (自适应)
                 HorizontalLayout {
                     vertical-stretch: 1;
                     Rectangle {
-                        horizontal-stretch: 27;
+                        width: 120px;  // 固定宽度，不再用比例
                         background: Theme.bg-panel-alt;
                         VerticalLayout {
                             padding: 8px;
@@ -1970,15 +1970,20 @@ export component AppWindow inherits Window {
                         }
                     }
                     Rectangle {
-                        horizontal-stretch: 73;
+                        horizontal-stretch: 1;
                         background: Theme.bg-panel;
-                        if root.ifd-page == "font" : VerticalLayout {
+                        // 内容区可滚动
+                        Flickable {
+                            viewport-height: content-area.preferred-height;
+                            content-area := VerticalLayout {
+                                alignment: start;
+                                if root.ifd-page == "font" : VerticalLayout {
                             padding: 18px;
                             spacing: 14px;
                             alignment: start;
 
                             VerticalLayout {
-                                spacing: 6px;
+                                spacing: 4px;
                                 Text { text: root.lang-en ? "Font family" : "字体";
                                        color: Theme.text-secondary; font-size: Theme.fs-sm; }
                                 HorizontalLayout {
@@ -1993,7 +1998,7 @@ export component AppWindow inherits Window {
                             }
 
                             VerticalLayout {
-                                spacing: 6px;
+                                spacing: 4px;
                                 Text { text: root.lang-en ? "Font size" : "字体大小";
                                        color: Theme.text-secondary; font-size: Theme.fs-sm; }
                                 HorizontalLayout {
@@ -2120,7 +2125,7 @@ export component AppWindow inherits Window {
 
                             // 预设背景色 + hex 输入
                             VerticalLayout {
-                                spacing: 6px;
+                                spacing: 4px;
                                 Text {
                                     text: root.lang-en ? "Background Color" : "背景颜色";
                                     color: Theme.text-secondary;
@@ -2128,10 +2133,10 @@ export component AppWindow inherits Window {
                                 }
                                 // 预设色块行
                                 HorizontalLayout {
-                                    spacing: 6px;
+                                    spacing: 4px;
                                     // 默认色按钮
                                     Rectangle {
-                                        width: 28px; height: 28px;
+                                        width: 22px; height: 22px;
                                         border-radius: 4px;
                                         border-width: 2px;
                                         border-color: root.term-bg-override == transparent ? Theme.accent : Theme.border-subtle;
@@ -2143,7 +2148,7 @@ export component AppWindow inherits Window {
                                     }
                                     // 预设色按钮
                                     for color[i] in root.bg-color-presets : Rectangle {
-                                        width: 28px; height: 28px;
+                                        width: 22px; height: 22px;
                                         border-radius: 4px;
                                         border-width: 2px;
                                         border-color: root.term-bg-override == color ? Theme.accent : Theme.border-subtle;
@@ -2157,7 +2162,7 @@ export component AppWindow inherits Window {
                                 }
                                 // hex 输入行：输入框 + 预览 + 应用按钮
                                 HorizontalLayout {
-                                    spacing: 6px;
+                                    spacing: 4px;
                                     // hex 输入框
                                     Rectangle {
                                         width: 120px; height: 26px;
@@ -2194,7 +2199,7 @@ export component AppWindow inherits Window {
 
                             // 背景图片
                             VerticalLayout {
-                                spacing: 6px;
+                                spacing: 4px;
                                 Text {
                                     text: root.lang-en ? "Background Image" : "背景图片";
                                     color: Theme.text-secondary;
@@ -2266,7 +2271,7 @@ export component AppWindow inherits Window {
 
                             // 透明度控制（用 +/- 按钮代替 Slider）
                             VerticalLayout {
-                                spacing: 6px;
+                                spacing: 4px;
                                 Text {
                                     text: root.lang-en ? "Image Opacity" : "图片透明度";
                                     color: Theme.text-secondary;
@@ -2276,7 +2281,7 @@ export component AppWindow inherits Window {
                                     spacing: 8px;
                                     // 减少按钮
                                     Rectangle {
-                                        width: 28px; height: 28px;
+                                        width: 22px; height: 22px;
                                         border-radius: Theme.radius-sm;
                                         border-width: 1px;
                                         border-color: Theme.border-subtle;
@@ -2304,7 +2309,7 @@ export component AppWindow inherits Window {
                                     }
                                     // 增加按钮
                                     Rectangle {
-                                        width: 28px; height: 28px;
+                                        width: 22px; height: 22px;
                                         border-radius: Theme.radius-sm;
                                         border-width: 1px;
                                         border-color: Theme.border-subtle;
@@ -2327,7 +2332,7 @@ export component AppWindow inherits Window {
 
                             // 字体大小控制（+/- 按钮，与透明度相同模式）
                             VerticalLayout {
-                                spacing: 6px;
+                                spacing: 4px;
                                 Text {
                                     text: root.lang-en ? "Font Size" : "字体大小";
                                     color: Theme.text-secondary;
@@ -2337,7 +2342,7 @@ export component AppWindow inherits Window {
                                     spacing: 8px;
                                     // 减小字号
                                     Rectangle {
-                                        width: 28px; height: 28px;
+                                        width: 22px; height: 22px;
                                         border-radius: Theme.radius-sm;
                                         border-width: 1px;
                                         border-color: Theme.border-subtle;
@@ -2365,7 +2370,7 @@ export component AppWindow inherits Window {
                                     }
                                     // 增大字号
                                     Rectangle {
-                                        width: 28px; height: 28px;
+                                        width: 22px; height: 22px;
                                         border-radius: Theme.radius-sm;
                                         border-width: 1px;
                                         border-color: Theme.border-subtle;
@@ -2388,7 +2393,7 @@ export component AppWindow inherits Window {
 
                             // 字体颜色 + hex 输入
                             VerticalLayout {
-                                spacing: 6px;
+                                spacing: 4px;
                                 Text {
                                     text: root.lang-en ? "Font Color" : "字体颜色";
                                     color: Theme.text-secondary;
@@ -2396,10 +2401,10 @@ export component AppWindow inherits Window {
                                 }
                                 // 预设色块行
                                 HorizontalLayout {
-                                    spacing: 6px;
+                                    spacing: 4px;
                                     // 默认色按钮
                                     Rectangle {
-                                        width: 28px; height: 28px;
+                                        width: 22px; height: 22px;
                                         border-radius: 4px;
                                         border-width: 2px;
                                         border-color: root.term-fg-override == transparent ? Theme.accent : Theme.border-subtle;
@@ -2411,7 +2416,7 @@ export component AppWindow inherits Window {
                                     }
                                     // 预设色按钮
                                     for color[i] in root.fg-color-presets : Rectangle {
-                                        width: 28px; height: 28px;
+                                        width: 22px; height: 22px;
                                         border-radius: 4px;
                                         border-width: 2px;
                                         border-color: root.term-fg-override == color ? Theme.accent : Theme.border-subtle;
@@ -2425,7 +2430,7 @@ export component AppWindow inherits Window {
                                 }
                                 // hex 输入行：输入框 + 预览 + 应用按钮
                                 HorizontalLayout {
-                                    spacing: 6px;
+                                    spacing: 4px;
                                     // hex 输入框
                                     Rectangle {
                                         width: 120px; height: 26px;
@@ -2470,11 +2475,13 @@ export component AppWindow inherits Window {
                                 wrap: word-wrap;
                             }
                         }
-                    }
-                }
-            }
-        }
-    }
+                    }  // content-area VerticalLayout
+                }  // Flickable
+                    }  // Rectangle (content)
+                }  // HorizontalLayout
+            }  // dialog body
+        }  // dialog Rectangle
+    }  // if interface-open
 
     // --- About dialog (centered on the window, with dim backdrop) ---------
     Rectangle {
@@ -2527,7 +2534,7 @@ export component AppWindow inherits Window {
                 }
 
                 Text {
-                    text: @tr("A lightweight Rust + Slint SSH terminal client by 'lil meatball'.");
+                    text: @tr("A Rust + Slint SSH terminal client by 'lil meatball'.");
                     color: Theme.text-secondary;
                     font-size: Theme.fs-sm;
                     wrap: word-wrap;

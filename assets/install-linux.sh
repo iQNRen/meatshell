@@ -56,7 +56,7 @@ cat > "$APP_DIR/rusterm.desktop" <<EOF
 Type=Application
 Name=rusterm
 GenericName=SSH Client
-Comment=Lightweight Rust + Slint SSH/SFTP client
+Comment=Rust + Slint SSH/SFTP client
 Comment[zh_CN]=轻量级 Rust + Slint SSH/SFTP 客户端
 Exec=$BIN
 Icon=rusterm

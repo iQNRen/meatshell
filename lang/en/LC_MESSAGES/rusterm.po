@@ -54,8 +54,8 @@ msgstr "About"
 msgid "About rusterm"
 msgstr "About rusterm"
 
-msgid "A lightweight Rust + Slint SSH terminal client by 'lil meatball'."
-msgstr "A lightweight Rust + Slint SSH terminal client by 'lil meatball'."
+msgid "A Rust + Slint SSH terminal client by 'lil meatball'."
+msgstr "A Rust + Slint SSH terminal client by 'lil meatball'."
 
 msgid "Open source · MIT / Apache-2.0"
 msgstr "Open source · MIT / Apache-2.0"
@@ -318,8 +318,8 @@ msgstr "-R: server port → target reached from here"
 msgid "-D: local SOCKS5 proxy"
 msgstr "-D: local SOCKS5 proxy"
 
-msgid "rusterm — a lightweight Rust + Slint SSH client by 'lil meatball'"
-msgstr "rusterm — a lightweight Rust + Slint SSH client by 'lil meatball'"
+msgid "rusterm — a Rust + Slint SSH client by 'lil meatball'"
+msgstr "rusterm — a Rust + Slint SSH client by 'lil meatball'"
 
 msgid "Quick connect"
 msgstr "Quick connect"
