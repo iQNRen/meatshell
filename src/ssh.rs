@@ -442,11 +442,7 @@ async fn run_session(
     channel.request_shell(true).await.context("request shell")?;
 
     let _ = events.send(SessionEvent::Connected);
-    let _ = events.send(SessionEvent::Status(format!(
-        "{} {}@{}",
-        t("已连接", "Connected"),
-        session.user, session.host
-    )));
+    // 连接状态已在侧边栏显示，不再发送到终端状态栏
 
     // Whether we have already injected the PROMPT_COMMAND setup.
     // We wait for the first non-empty data chunk (the initial shell prompt)

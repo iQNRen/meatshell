@@ -80,6 +80,7 @@ export component AppWindow inherits Window {
 
     // --- Sidebar data ------------------------------------------------------
     in property <string> connection-state: @tr("Not connected");
+    in property <string> host-ip: "";                  // 纯 IP 地址，用于复制
     in property <int> conn-state;                       // 0 gray / 1 green / 2 yellow
     in property <string> resource-title: @tr("Local resources");    // @tr("Local resources") | @tr("Server resources")
     in property <float> cpu-percent;
@@ -356,6 +357,7 @@ export component AppWindow inherits Window {
             clip: true;
             animate width { duration: 150ms; easing: ease-out; }
             connection-state: root.connection-state;
+            host-ip: root.host-ip;
             conn-state: root.conn-state;
             resource-title: root.resource-title;
             cpu-percent: root.cpu-percent;

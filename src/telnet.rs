@@ -126,11 +126,7 @@ async fn run_telnet(
     let _ = stream.set_nodelay(true);
 
     let _ = events.send(SessionEvent::Connected);
-    let _ = events.send(SessionEvent::Status(format!(
-        "{} {}",
-        t("已连接", "Connected"),
-        addr
-    )));
+    // 连接状态已在侧边栏显示，不再发送到终端状态栏
 
     let (mut rd, mut wr) = tokio::io::split(stream);
 

@@ -193,6 +193,7 @@ component NetGraph inherits VerticalLayout {
 // @tr("Status") column but kept minimal for the v0.1 baseline.
 export component Sidebar inherits Rectangle {
     in property <string> connection-state: @tr("Not connected");
+    in property <string> host-ip: "";                   // 纯 IP 地址，用于复制
     in property <int> conn-state;                    // 0 gray / 1 green / 2 yellow
     callback copy-text(string);                      // 复制连接信息到剪贴板
     in property <string> resource-title: @tr("Local resources");
@@ -282,7 +283,7 @@ export component Sidebar inherits Rectangle {
                     }
                     conn-touch := TouchArea {
                         mouse-cursor: pointer;
-                        clicked => { root.copy-text(root.connection-state); }
+                        clicked => { root.copy-text(root.host-ip); }
                     }
                 }
             }

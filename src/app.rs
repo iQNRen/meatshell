@@ -2166,6 +2166,9 @@ fn refresh_sidebar(
         Some(st) if st.state == 1 => {
             win.set_conn_state(1);
             win.set_connection_state(st.host.clone().into());
+            // 提取纯 IP 地址用于复制（从 "root@192.168.100.2" 中取 "@" 后面的部分）
+            let ip = st.host.split('@').last().unwrap_or(&st.host).to_string();
+            win.set_host_ip(ip.into());
             win.set_resource_title(t("服务器资源", "Server resources").into());
             win.set_cpu_percent(st.cpu);
             win.set_mem_percent(pct(st.mem_used_kib, st.mem_total_kib));
@@ -2193,6 +2196,7 @@ fn refresh_sidebar(
         Some(st) if st.state == 2 => {
             win.set_conn_state(2);
             win.set_connection_state(format!("{} {}", st.host, t("已断开", "disconnected")).into());
+            win.set_host_ip("".into());  // 断开后清空 IP
             win.set_resource_title(t("服务器资源", "Server resources").into());
             clear_stats(win);
             set_top_local(win);
@@ -2201,6 +2205,7 @@ fn refresh_sidebar(
         Some(st) => {
             win.set_conn_state(0);
             win.set_connection_state(format!("{} {}", t("连接中", "Connecting"), st.host).into());
+            win.set_host_ip("".into());  // 连接中清空 IP
             win.set_resource_title(t("服务器资源", "Server resources").into());
             clear_stats(win);
             set_top_local(win);

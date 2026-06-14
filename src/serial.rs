@@ -127,15 +127,7 @@ async fn run_serial(
     let writer = Arc::new(Mutex::new(writer));
 
     let _ = events.send(SessionEvent::Connected);
-    let _ = events.send(SessionEvent::Status(format!(
-        "{} {} @ {} {}{}{}",
-        t("已连接", "Connected"),
-        port_name,
-        session.baud_rate,
-        session.data_bits,
-        parity_letter(&session.parity),
-        session.stop_bits,
-    )));
+    // 连接状态已在侧边栏显示，不再发送到终端状态栏
 
     // --- Reader thread ------------------------------------------------------
     let running = Arc::new(AtomicBool::new(true));
