@@ -11,6 +11,16 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
+/// 全局终端主题覆盖（字体颜色自定义用）
+/// vt_color_to_slint 函数读取此值来覆盖默认字体颜色
+pub(crate) static THEME_OVERRIDE: Mutex<ThemeOverride> = Mutex::new(ThemeOverride { fg_override: None });
+
+/// 主题覆盖配置
+pub(crate) struct ThemeOverride {
+    /// 自定义字体颜色（None = 使用默认）
+    pub fg_override: Option<slint::Color>,
+}
+
 /// Per-terminal state: vt100 parser drives all rendering for both normal
 /// (bash) and alt-screen (vim/nano/htop) modes.
 ///
@@ -239,18 +249,46 @@ pub fn run() -> Result<()> {
     // Populate the Interface font picker with installed monospace families.
     window.set_term_fonts(ModelRc::from(Rc::new(VecModel::from(system_monospace_fonts()))));
 
-    // 预设终端背景色（深色系为主，适合终端使用）
+    // 预设终端背景色（七彩斑斓 + 经典深色）
     let bg_presets: Vec<slint::Brush> = vec![
+        // 经典深色
         slint::Color::from_rgb_u8(0x1a, 0x1b, 0x26).into(),  // Tokyo Night
         slint::Color::from_rgb_u8(0x28, 0x2a, 0x36).into(),  // Dracula
-        slint::Color::from_rgb_u8(0x00, 0x2b, 0x36).into(),  // Solarized Dark
-        slint::Color::from_rgb_u8(0x2d, 0x2d, 0x2d).into(),  // Monokai
         slint::Color::from_rgb_u8(0x1e, 0x1e, 0x2e).into(),  // Catppuccin
-        slint::Color::from_rgb_u8(0x0d, 0x11, 0x17).into(),  // GitHub Dark
-        slint::Color::from_rgb_u8(0x30, 0x0a, 0x24).into(),  // 紫罗兰
+        // 七彩系列
         slint::Color::from_rgb_u8(0x0a, 0x19, 0x29).into(),  // 深海蓝
+        slint::Color::from_rgb_u8(0x00, 0x2b, 0x36).into(),  // 青色
+        slint::Color::from_rgb_u8(0x1a, 0x3a, 0x2a).into(),  // 墨绿
+        slint::Color::from_rgb_u8(0x2d, 0x1a, 0x1a).into(),  // 暗红
+        slint::Color::from_rgb_u8(0x30, 0x0a, 0x24).into(),  // 紫罗兰
+        slint::Color::from_rgb_u8(0x2a, 0x1a, 0x3a).into(),  // 深紫
+        slint::Color::from_rgb_u8(0x3a, 0x2a, 0x0a).into(),  // 深金
+        // 亮色系列
+        slint::Color::from_rgb_u8(0xf0, 0xf0, 0xf0).into(),  // 亮白
+        slint::Color::from_rgb_u8(0xff, 0xf8, 0xe1).into(),  // 暖黄
+        slint::Color::from_rgb_u8(0xe8, 0xf5, 0xe9).into(),  // 浅绿
+        slint::Color::from_rgb_u8(0xe3, 0xf2, 0xfd).into(),  // 浅蓝
+        slint::Color::from_rgb_u8(0xfc, 0xe4, 0xec).into(),  // 粉红
+        slint::Color::from_rgb_u8(0xf3, 0xe5, 0xf5).into(),  // 浅紫
     ];
     window.set_bg_color_presets(ModelRc::from(Rc::new(VecModel::from(bg_presets))));
+
+    // 预设终端字体颜色
+    let fg_presets: Vec<slint::Brush> = vec![
+        slint::Color::from_rgb_u8(0xd4, 0xd4, 0xd4).into(),  // 默认灰白
+        slint::Color::from_rgb_u8(0xff, 0xff, 0xff).into(),  // 纯白
+        slint::Color::from_rgb_u8(0x00, 0xff, 0x00).into(),  // 经典绿
+        slint::Color::from_rgb_u8(0x00, 0xd4, 0xaa).into(),  // 青绿
+        slint::Color::from_rgb_u8(0x50, 0xfa, 0x7b).into(),  // 亮绿
+        slint::Color::from_rgb_u8(0xff, 0xb8, 0x6c).into(),  // 橙色
+        slint::Color::from_rgb_u8(0xff, 0x79, 0xc6).into(),  // 粉色
+        slint::Color::from_rgb_u8(0xbd, 0x93, 0xf9).into(),  // 紫色
+        slint::Color::from_rgb_u8(0x8b, 0xe9, 0xfd).into(),  // 天蓝
+        slint::Color::from_rgb_u8(0xf1, 0xfa, 0x8c).into(),  // 柠檬黄
+        slint::Color::from_rgb_u8(0xff, 0x55, 0x55).into(),  // 红色
+        slint::Color::from_rgb_u8(0x2d, 0x2d, 0x2f).into(),  // 深黑（浅色背景用）
+    ];
+    window.set_fg_color_presets(ModelRc::from(Rc::new(VecModel::from(fg_presets))));
 
     // 从配置加载终端背景设置
     {
@@ -274,6 +312,17 @@ pub fn run() -> Result<()> {
         }
         // 透明度
         window.set_term_bg_opacity(s.term_bg_opacity());
+        // 字体颜色
+        let fg_color = s.term_fg_color();
+        if !fg_color.is_empty() {
+            if let Some(c) = parse_hex_color(fg_color) {
+                window.set_term_fg_override(c.into());
+                // 同步到全局 THEME_OVERRIDE
+                if let Ok(mut theme) = THEME_OVERRIDE.lock() {
+                    theme.fg_override = Some(c);
+                }
+            }
+        }
     }
 
     // Command bar (#55): seed quick commands + history from the config.
@@ -452,6 +501,37 @@ pub fn run() -> Result<()> {
             }
             if let Some(w) = weak.upgrade() {
                 w.set_term_bg_image_src(slint::Image::default());
+            }
+        });
+    }
+    // 终端字体颜色回调
+    {
+        let preset_colors = vec![
+            "#d4d4d4", "#ffffff", "#00ff00", "#00d4aa",
+            "#50fa7b", "#ffb86c", "#ff79c6", "#bd93f9",
+            "#8be9fd", "#f1fa8c", "#ff5555", "#2d2d2f",
+        ];
+        let weak = window.as_weak();
+        let store = store.clone();
+        window.on_set_term_fg_color(move |idx: i32| {
+            let (hex, brush, color_opt) = if idx < 0 || idx as usize >= preset_colors.len() {
+                ("".to_string(), slint::Brush::default(), None)
+            } else {
+                let h = preset_colors[idx as usize];
+                let c = parse_hex_color(h).unwrap();
+                (h.to_string(), c.into(), Some(c))
+            };
+            {
+                let mut s = store.borrow_mut();
+                s.set_term_fg_color(hex);
+                let _ = s.save();
+            }
+            // 同步到全局 THEME_OVERRIDE，让终端渲染使用新颜色
+            if let Ok(mut theme) = THEME_OVERRIDE.lock() {
+                theme.fg_override = color_opt;
+            }
+            if let Some(w) = weak.upgrade() {
+                w.set_term_fg_override(brush);
             }
         });
     }
@@ -4804,6 +4884,11 @@ const ANSI16_LIGHT_BG: [(u8, u8, u8); 16] = [
 fn vt_color_to_slint(color: vt100::Color, bold: bool, is_dark: bool) -> slint::Color {
     let (r, g, b) = match color {
         vt100::Color::Default => {
+            // 如果用户设置了自定义字体颜色，使用自定义色
+            let theme = THEME_OVERRIDE.lock().unwrap();
+            if let Some(c) = theme.fg_override {
+                return c;
+            }
             if is_dark { (0xd4, 0xd4, 0xd4) } else { (0x2d, 0x2d, 0x2f) }
         }
         vt100::Color::Idx(i) => idx_to_rgb(i, bold, is_dark),

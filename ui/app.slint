@@ -143,6 +143,11 @@ export component AppWindow inherits Window {
     callback set-term-bg-opacity(float);           // 设置背景图透明度
     callback pick-bg-image();                      // 打开文件选择器
     callback clear-bg-image();                     // 清除背景图
+
+    // 终端字体颜色自定义
+    in-out property <brush> term-fg-override <=> Theme.term-fg-override;  // 自定义字体颜色
+    in property <[brush]> fg-color-presets;        // 预设字体颜色列表
+    callback set-term-fg-color(int);               // 设置自定义字体颜色（索引，-1=默认）
     in-out property <bool> interface-open: false;  // Interface settings dialog
     // Interface dialog position (draggable by its title bar); init centered.
     property <length> ifd-x: (root.width - 644px) / 2;
@@ -2278,6 +2283,44 @@ export component AppWindow inherits Window {
                                             font-size: Theme.fs-md;
                                             horizontal-alignment: center;
                                             vertical-alignment: center;
+                                        }
+                                    }
+                                    Rectangle { horizontal-stretch: 1; }
+                                }
+                            }
+
+                            // 字体颜色
+                            VerticalLayout {
+                                spacing: 6px;
+                                Text {
+                                    text: root.lang-en ? "Font Color" : "字体颜色";
+                                    color: Theme.text-secondary;
+                                    font-size: Theme.fs-sm;
+                                }
+                                HorizontalLayout {
+                                    spacing: 6px;
+                                    // 默认色按钮
+                                    Rectangle {
+                                        width: 28px; height: 28px;
+                                        border-radius: 4px;
+                                        border-width: 2px;
+                                        border-color: root.term-fg-override == transparent ? Theme.accent : Theme.border-subtle;
+                                        background: Theme.term-fg;
+                                        TouchArea {
+                                            mouse-cursor: pointer;
+                                            clicked => { root.set-term-fg-color(-1); }
+                                        }
+                                    }
+                                    // 预设色按钮
+                                    for color[i] in root.fg-color-presets : Rectangle {
+                                        width: 28px; height: 28px;
+                                        border-radius: 4px;
+                                        border-width: 2px;
+                                        border-color: root.term-fg-override == color ? Theme.accent : Theme.border-subtle;
+                                        background: color;
+                                        TouchArea {
+                                            mouse-cursor: pointer;
+                                            clicked => { root.set-term-fg-color(i); }
                                         }
                                     }
                                     Rectangle { horizontal-stretch: 1; }
