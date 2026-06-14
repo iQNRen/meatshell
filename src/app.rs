@@ -777,16 +777,19 @@ pub fn run() -> Result<()> {
                 Err(e) => { w.set_webdav_status(format!("{e}").into()); w.set_webdav_busy(false); return; }
             };
             let weak2 = weak.clone();
-            slint::spawn_local(async move {
-                let r = crate::webdav::test_connection(&settings).await;
-                if let Some(w) = weak2.upgrade() {
-                    match r {
-                        Ok(()) => w.set_webdav_status("connected ✓".into()),
-                        Err(e) => w.set_webdav_status(format!("fail: {e}").into()),
+            std::thread::spawn(move || {
+                let rt = tokio::runtime::Runtime::new().unwrap();
+                let r = rt.block_on(crate::webdav::test_connection(&settings));
+                slint::invoke_from_event_loop(move || {
+                    if let Some(w) = weak2.upgrade() {
+                        match r {
+                            Ok(()) => w.set_webdav_status("connected ✓".into()),
+                            Err(e) => w.set_webdav_status(format!("fail: {e}").into()),
+                        }
+                        w.set_webdav_busy(false);
                     }
-                    w.set_webdav_busy(false);
-                }
-            }).ok();
+                }).ok();
+            });
         });
     }
 
@@ -802,16 +805,19 @@ pub fn run() -> Result<()> {
                 Err(e) => { w.set_webdav_status(format!("{e}").into()); w.set_webdav_busy(false); return; }
             };
             let weak2 = weak.clone();
-            slint::spawn_local(async move {
-                let r = crate::webdav::upload(&settings).await;
-                if let Some(w) = weak2.upgrade() {
-                    match r {
-                        Ok(h) => w.set_webdav_status(format!("upload ok (sha256: {}…)", &h[..16]).into()),
-                        Err(e) => w.set_webdav_status(format!("upload fail: {e}").into()),
+            std::thread::spawn(move || {
+                let rt = tokio::runtime::Runtime::new().unwrap();
+                let r = rt.block_on(crate::webdav::upload(&settings));
+                slint::invoke_from_event_loop(move || {
+                    if let Some(w) = weak2.upgrade() {
+                        match r {
+                            Ok(h) => w.set_webdav_status(format!("upload ok (sha256: {}…)", &h[..16]).into()),
+                            Err(e) => w.set_webdav_status(format!("upload fail: {e}").into()),
+                        }
+                        w.set_webdav_busy(false);
                     }
-                    w.set_webdav_busy(false);
-                }
-            }).ok();
+                }).ok();
+            });
         });
     }
 
@@ -827,16 +833,19 @@ pub fn run() -> Result<()> {
                 Err(e) => { w.set_webdav_status(format!("{e}").into()); w.set_webdav_busy(false); return; }
             };
             let weak2 = weak.clone();
-            slint::spawn_local(async move {
-                let r = crate::webdav::download(&settings).await;
-                if let Some(w) = weak2.upgrade() {
-                    match r {
-                        Ok(h) => w.set_webdav_status(format!("download ok (sha256: {}…)", &h[..16]).into()),
-                        Err(e) => w.set_webdav_status(format!("download fail: {e}").into()),
+            std::thread::spawn(move || {
+                let rt = tokio::runtime::Runtime::new().unwrap();
+                let r = rt.block_on(crate::webdav::download(&settings));
+                slint::invoke_from_event_loop(move || {
+                    if let Some(w) = weak2.upgrade() {
+                        match r {
+                            Ok(h) => w.set_webdav_status(format!("download ok (sha256: {}…)", &h[..16]).into()),
+                            Err(e) => w.set_webdav_status(format!("download fail: {e}").into()),
+                        }
+                        w.set_webdav_busy(false);
                     }
-                    w.set_webdav_busy(false);
-                }
-            }).ok();
+                }).ok();
+            });
         });
     }
 
