@@ -51,6 +51,8 @@ pub enum SyncResult {
     Conflict { local_hash: String, remote_hash: String },
     /// 已合并：返回合并后的 SHA256
     Merged(String),
+    /// 不安全的上传（新设备误覆盖），返回原因
+    UnsafeUpload(String),
 }
 
 impl std::fmt::Display for SyncResult {
@@ -61,6 +63,7 @@ impl std::fmt::Display for SyncResult {
                 write!(f, "conflict local={} remote={}", &local_hash[..8], &remote_hash[..8])
             }
             SyncResult::Merged(h) => write!(f, "merged ({})", &h[..8]),
+            SyncResult::UnsafeUpload(reason) => write!(f, "unsafe: {}", reason),
         }
     }
 }
@@ -186,13 +189,69 @@ pub async fn get_remote_hash(settings: &WebDavSettings) -> Result<Option<String>
     Ok(Some(sha256_hex(&data)))
 }
 
+/// 检查上传安全性
+///
+/// 返回：
+/// - Ok(()) — 安全，可以上传
+/// - Err(msg) — 危险，返回原因
+async fn check_upload_safety(settings: &WebDavSettings, local_data: &[u8]) -> Result<()> {
+    // 1. 检查本地是否为空（0 个 session）
+    if let Ok(local_json) = serde_json::from_slice::<serde_json::Value>(local_data) {
+        let local_sessions = local_json.get("sessions")
+            .and_then(|s| s.as_array())
+            .map(|a| a.len())
+            .unwrap_or(0);
+
+        if local_sessions == 0 {
+            bail!("local sessions is empty, upload would delete cloud data");
+        }
+
+        // 2. 检查云端是否有更多 session（首次同步保护）
+        if settings.last_sync_hash.is_empty() {
+            // 首次同步，检查云端文件
+            if let Ok(client) = build_client() {
+                let url = remote_url(&settings.base_url, REMOTE_FILE);
+                if let Ok(resp) = client
+                    .get(&url)
+                    .basic_auth(&settings.username, Some(&settings.password))
+                    .send()
+                    .await
+                {
+                    if resp.status().is_success() {
+                        if let Ok(remote_data) = resp.bytes().await {
+                            if let Ok(remote_json) = serde_json::from_slice::<serde_json::Value>(&remote_data) {
+                                let remote_sessions = remote_json.get("sessions")
+                                    .and_then(|s| s.as_array())
+                                    .map(|a| a.len())
+                                    .unwrap_or(0);
+
+                                // 云端有 session，本地为空或更少，可能是新设备
+                                if remote_sessions > 0 && local_sessions < remote_sessions {
+                                    bail!(
+                                        "cloud has {} sessions but local has only {}, \
+                                         use download first or force upload",
+                                        remote_sessions, local_sessions
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
 /// 上传 sessions.json 到 WebDAV 服务器（带冲突检测）
 ///
 /// 流程：
 /// 1. 读取本地文件，计算 SHA256
-/// 2. 检查远端文件版本（如果设置了 last_sync_hash）
-/// 3. 如果远端有新版本（hash 不同），返回冲突
-/// 4. 否则上传并更新 last_sync_hash
+/// 2. 检查上传安全性（防止新设备误覆盖）
+/// 3. 检查远端文件版本（如果设置了 last_sync_hash）
+/// 4. 如果远端有新版本（hash 不同），返回冲突
+/// 5. 否则上传并更新 last_sync_hash
 pub async fn upload(settings: &WebDavSettings) -> Result<SyncResult> {
     let config_path = sessions_json_path()?;
     if !config_path.exists() {
@@ -204,6 +263,12 @@ pub async fn upload(settings: &WebDavSettings) -> Result<SyncResult> {
         .with_context(|| format!("failed to read {}", config_path.display()))?;
     let local_hash = sha256_hex(&data);
     let client = build_client()?;
+
+    // 安全检查：防止新设备误覆盖云端数据
+    if let Err(e) = check_upload_safety(settings, &data).await {
+        tracing::warn!("upload safety check failed: {}", e);
+        return Ok(SyncResult::UnsafeUpload(e.to_string()));
+    }
 
     // 如果有上次同步记录，检查远端是否有新版本
     if !settings.last_sync_hash.is_empty() {

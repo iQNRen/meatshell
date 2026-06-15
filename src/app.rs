@@ -1090,6 +1090,12 @@ pub fn run() -> Result<()> {
                                 w.set_webdav_status(format!("merged (sha256: {}…)", &h[..16]).into());
                                 update_sync_hash(&h);
                             }
+                            Ok(crate::webdav::SyncResult::UnsafeUpload(reason)) => {
+                                // 不安全的上传，提示用户先下载或强制上传
+                                w.set_webdav_status(format!(
+                                    "⚠ {}", reason
+                                ).into());
+                            }
                             Err(e) => w.set_webdav_status(format!("upload fail: {e}").into()),
                         }
                         w.set_webdav_busy(false);
@@ -1119,6 +1125,9 @@ pub fn run() -> Result<()> {
                         format!("conflict:{local_hash}:{remote_hash}")
                     }
                     Ok(crate::webdav::SyncResult::Merged(h)) => format!("merged:{h}"),
+                    Ok(crate::webdav::SyncResult::UnsafeUpload(reason)) => {
+                        format!("unsafe:{reason}")
+                    }
                     Err(e) => format!("fail:{e}"),
                 };
                 // 用 invoke_from_event_loop 回主线程，只传 Send 类型
