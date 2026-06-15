@@ -15,6 +15,10 @@ use std::sync::{Arc, Mutex};
 /// vt_color_to_slint 函数读取此值来覆盖默认字体颜色
 pub(crate) static THEME_OVERRIDE: Mutex<ThemeOverride> = Mutex::new(ThemeOverride { fg_override: None });
 
+/// 主机密钥验证的响应通道（SSH 线程等待 UI 线程的用户决策）
+use tokio::sync::oneshot;
+pub(crate) static HOST_KEY_RESPONSE: Mutex<Option<oneshot::Sender<bool>>> = Mutex::new(None);
+
 /// 主题覆盖配置
 pub(crate) struct ThemeOverride {
     /// 自定义字体颜色（None = 使用默认）
@@ -779,6 +783,36 @@ pub fn run() -> Result<()> {
                     }
                 }).ok();
             });
+        });
+    }
+
+    // 主机密钥验证回调
+    {
+        let weak = window.as_weak();
+        window.on_host_key_accepted(move || {
+            // 用户接受密钥，发送 true 给 SSH 线程
+            if let Ok(mut guard) = HOST_KEY_RESPONSE.lock() {
+                if let Some(tx) = guard.take() {
+                    let _ = tx.send(true);
+                }
+            }
+            if let Some(w) = weak.upgrade() {
+                w.set_host_key_open(false);
+            }
+        });
+    }
+    {
+        let weak = window.as_weak();
+        window.on_host_key_rejected(move || {
+            // 用户拒绝密钥，发送 false 给 SSH 线程
+            if let Ok(mut guard) = HOST_KEY_RESPONSE.lock() {
+                if let Some(tx) = guard.take() {
+                    let _ = tx.send(false);
+                }
+            }
+            if let Some(w) = weak.upgrade() {
+                w.set_host_key_open(false);
+            }
         });
     }
 
@@ -2872,6 +2906,22 @@ fn apply_session_event_to_window(
                 match found {
                     Some(i) => model.set_row_data(i, rec),
                     None => model.insert(0, rec), // newest at top
+                }
+            }
+        }
+        SessionEvent::HostKeyVerify { host, key_type, fingerprint, key_changed, response } => {
+            // 设置主机密钥验证对话框
+            win.set_host_key_host(host.into());
+            win.set_host_key_type(key_type.into());
+            win.set_host_key_fingerprint(fingerprint.into());
+            win.set_host_key_changed(key_changed);
+            win.set_host_key_open(true);
+            // 从 Arc<Mutex<Option<Sender>>> 中提取 Sender，保存到全局变量
+            if let Ok(mut resp_guard) = response.lock() {
+                if let Some(tx) = resp_guard.take() {
+                    if let Ok(mut guard) = HOST_KEY_RESPONSE.lock() {
+                        *guard = Some(tx);
+                    }
                 }
             }
         }

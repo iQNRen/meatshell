@@ -16,6 +16,7 @@ import { Welcome, SessionInfo } from "welcome.slint";
 import { SessionDialog, SessionDraft, PortFwd } from "session_dialog.slint";
 import { WebDavDialog } from "webdav_dialog.slint";
 import { ConfirmDialog } from "confirm_dialog.slint";
+import { HostKeyDialog } from "host_key_dialog.slint";
 import { TerminalView, TermSpan, TermMatch, QuickCmd } from "terminal_view.slint";
 import { SftpEntry, SftpTreeNode } from "sftp_panel.slint";
 import { ComboBox, SpinBox, LineEdit, Button, ScrollView, CheckBox } from "std-widgets.slint";
@@ -108,6 +109,15 @@ export component AppWindow inherits Window {
     in-out property <bool> settings-open: false;  // settings menu popup
     in-out property <bool> sidebar-collapsed: false; // left panel hidden
     in-out property <bool> about-open: false;     // centered About dialog
+
+    // 主机密钥验证对话框
+    in-out property <bool> host-key-open: false;
+    in-out property <string> host-key-host: "";
+    in-out property <string> host-key-type: "";
+    in-out property <string> host-key-fingerprint: "";
+    in-out property <bool> host-key-changed: false;
+    callback host-key-accepted();
+    callback host-key-rejected();
     in property <string> download-dir;      // preset SFTP download folder ("" = ask)
     in-out property <bool> proc-open: false; // process monitor popup (#23)
     in property <bool> proc-available;       // a live remote session is active
@@ -2044,7 +2054,7 @@ export component AppWindow inherits Window {
                                         value: root.term-font-size / 1px;
                                         minimum: 8;
                                         maximum: 32;
-                                        edited(v) => { root.set-term-font-size(v); }
+                                        edited => { root.set-term-font-size(self.value); }
                                     }
                                     Text {
                                         text: (root.term-font-size / 1px) + " px";
@@ -2783,6 +2793,19 @@ export component AppWindow inherits Window {
             vertical-alignment: center;
             horizontal-alignment: center;
         }
+    }
+
+    // 主机密钥验证对话框
+    HostKeyDialog {
+        width: parent.width;
+        height: parent.height;
+        is-open <=> root.host-key-open;
+        host <=> root.host-key-host;
+        key-type <=> root.host-key-type;
+        fingerprint <=> root.host-key-fingerprint;
+        key-changed <=> root.host-key-changed;
+        accept => { root.host-key-accepted(); }
+        reject => { root.host-key-rejected(); }
     }
 
 }

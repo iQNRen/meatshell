@@ -1,0 +1,169 @@
+import { Theme } from "theme.slint";
+import { GhostButton, PrimaryButton } from "widgets.slint";
+
+// 主机密钥验证弹窗
+// Host key verification dialog — shown when connecting to a new server or
+// when the server key has changed (possible MITM attack).
+export component HostKeyDialog inherits Rectangle {
+    in-out property <bool> is-open: false;
+    in property <string> host;          // 服务器地址 (host:port)
+    in property <string> key-type;      // 密钥类型 (ssh-rsa, ssh-ed25519, etc.)
+    in property <string> fingerprint;   // 密钥指纹 (SHA256:...)
+    in property <bool> key-changed: false; // true = 密钥变更（MITM 警告）
+
+    callback accept();   // 用户接受 / User accepts
+    callback reject();   // 用户拒绝 / User rejects
+
+    visible: is-open;
+    background: #000000aa;
+
+    // 点击背景关闭 / Backdrop click rejects
+    TouchArea {
+        width: 100%;
+        height: 100%;
+        clicked => { root.reject(); }
+    }
+
+    Rectangle {
+        width: 460px;
+        height: card.preferred-height;
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        background: Theme.bg-panel;
+        border-radius: Theme.radius-lg;
+        border-width: 1px;
+        border-color: root.key-changed ? Theme.danger : Theme.border-strong;
+        drop-shadow-blur: 24px;
+        drop-shadow-color: #00000080;
+
+        // 阻止点击穿透 / Swallow clicks inside the card
+        TouchArea { width: 100%; height: 100%; }
+
+        card := VerticalLayout {
+            padding: 24px;
+            spacing: 16px;
+
+            // 标题行 / Title row
+            HorizontalLayout {
+                spacing: 8px;
+                alignment: start;
+                Text {
+                    text: root.key-changed ? "⚠" : "🔑";
+                    font-size: Theme.fs-xl;
+                    vertical-alignment: center;
+                }
+                Text {
+                    text: root.key-changed
+                        ? @tr("Host key changed!")
+                        : @tr("Host key verification");
+                    color: root.key-changed ? Theme.danger : Theme.text-primary;
+                    font-size: Theme.fs-xl;
+                    font-weight: 600;
+                    vertical-alignment: center;
+                }
+            }
+
+            // 说明文字 / Description text
+            if root.key-changed : Text {
+                text: @tr("WARNING: The host key has changed! This could indicate a man-in-the-middle attack. Proceed with caution.");
+                color: Theme.danger;
+                font-size: Theme.fs-md;
+                wrap: word-wrap;
+            }
+            if !root.key-changed : Text {
+                text: @tr("The authenticity of this host cannot be established. Do you want to continue?");
+                color: Theme.text-secondary;
+                font-size: Theme.fs-md;
+                wrap: word-wrap;
+            }
+
+            // 密钥详情面板 / Key details panel
+            Rectangle {
+                background: Theme.bg-elevated;
+                border-radius: Theme.radius-sm;
+                border-width: 1px;
+                border-color: Theme.border-subtle;
+                height: details.preferred-height + 16px;
+
+                details := VerticalLayout {
+                    padding-left: 12px;
+                    padding-right: 12px;
+                    padding-top: 8px;
+                    padding-bottom: 8px;
+                    spacing: 6px;
+
+                    HorizontalLayout {
+                        spacing: 8px;
+                        Text {
+                            text: @tr("Host:");
+                            color: Theme.text-secondary;
+                            font-size: Theme.fs-sm;
+                            horizontal-alignment: right;
+                            width: 80px;
+                        }
+                        Text {
+                            text: root.host;
+                            color: Theme.text-primary;
+                            font-family: Theme.font-mono;
+                            font-size: Theme.fs-sm;
+                        }
+                    }
+
+                    HorizontalLayout {
+                        spacing: 8px;
+                        Text {
+                            text: @tr("Key type:");
+                            color: Theme.text-secondary;
+                            font-size: Theme.fs-sm;
+                            horizontal-alignment: right;
+                            width: 80px;
+                        }
+                        Text {
+                            text: root.key-type;
+                            color: Theme.text-primary;
+                            font-family: Theme.font-mono;
+                            font-size: Theme.fs-sm;
+                        }
+                    }
+
+                    HorizontalLayout {
+                        spacing: 8px;
+                        Text {
+                            text: @tr("Fingerprint:");
+                            color: Theme.text-secondary;
+                            font-size: Theme.fs-sm;
+                            horizontal-alignment: right;
+                            width: 80px;
+                        }
+                        Text {
+                            text: root.fingerprint;
+                            color: Theme.text-primary;
+                            font-family: Theme.font-mono;
+                            font-size: Theme.fs-sm;
+                            wrap: word-wrap;
+                        }
+                    }
+                }
+            }
+
+            // 按钮行 / Button row
+            HorizontalLayout {
+                alignment: end;
+                spacing: 8px;
+                GhostButton {
+                    text: @tr("Reject");
+                    clicked => { root.reject(); }
+                }
+                if !root.key-changed : PrimaryButton {
+                    text: @tr("Accept");
+                    clicked => { root.accept(); }
+                }
+                if root.key-changed : PrimaryButton {
+                    // 密钥变更时用警告色 / Use warning color for key changes
+                    text: @tr("Accept Risk");
+                    clicked => { root.accept(); }
+                }
+            }
+        }
+    }
+}

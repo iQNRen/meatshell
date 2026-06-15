@@ -4,17 +4,19 @@
 //! on the shared Tokio runtime; commands come in via an MPSC channel and
 //! output lines are pushed back via an `UnboundedSender<SessionEvent>`.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
+use base64::Engine as _;
 use russh::client::{self, Handle, Handler, Msg};
 use russh::keys::key::PrivateKeyWithHashAlg;
 use russh::keys::load_secret_key;
 use russh::{Channel, ChannelId, ChannelMsg, Disconnect};
 use ssh_key::{HashAlg, PublicKey};
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
+use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 
 use crate::config::{AuthMethod, Session};
@@ -248,6 +250,22 @@ pub enum SessionEvent {
         edit: bool,
         error: String,
     },
+
+    /// 主机密钥验证请求 — 首次连接或密钥变更时弹窗让用户确认
+    /// Host key verification — shown when connecting to a new server or when
+    /// the server key has changed (possible MITM attack).
+    HostKeyVerify {
+        /// 服务器地址 (host:port)
+        host: String,
+        /// 密钥类型 (ssh-rsa, ssh-ed25519, etc.)
+        key_type: String,
+        /// 密钥指纹 (SHA256:...)
+        fingerprint: String,
+        /// 是否为密钥变更（已知主机但密钥不同 → 警告中间人攻击）
+        key_changed: bool,
+        /// 用户确认/拒绝的 oneshot channel（Arc<Mutex> 包装以便 Clone/Debug）
+        response: Arc<std::sync::Mutex<Option<oneshot::Sender<bool>>>>,
+    },
 }
 
 /// Handle retained by the UI layer to talk to a running session.
@@ -348,6 +366,7 @@ async fn run_session(
     let handler = ClientHandler {
         remote_forwards,
         events: events.clone(),
+        host: format!("{}:{}", session.host, session.port),
     };
     let addr = format!("{}:{}", session.host, session.port);
     // Connect directly, or tunnel through a SOCKS5 / HTTP proxy (issue #7).
@@ -974,6 +993,8 @@ fn parse_net_dev_line(line: &str) -> Option<(String, (u64, u64))> {
 pub(crate) struct ClientHandler {
     pub(crate) remote_forwards: std::collections::HashMap<u32, (String, u16)>,
     pub(crate) events: UnboundedSender<SessionEvent>,
+    /// 目标服务器地址 (host:port)，用于 known_hosts 查找
+    pub(crate) host: String,
 }
 
 #[async_trait]
@@ -982,9 +1003,126 @@ impl Handler for ClientHandler {
 
     async fn check_server_key(
         &mut self,
-        _server_public_key: &PublicKey,
+        server_public_key: &PublicKey,
     ) -> Result<bool, Self::Error> {
-        Ok(true)
+        // --- 获取密钥信息 / Extract key metadata ---
+        let key_type = server_public_key.algorithm().to_string();
+        let fingerprint = format!("{}", server_public_key.fingerprint(HashAlg::Sha256));
+
+        // --- known_hosts 文件路径 / Locate known_hosts file ---
+        let kh_path = directories::ProjectDirs::from("dev", "rusterm", "rusterm")
+            .map(|d| d.config_dir().join("known_hosts"))
+            .unwrap_or_else(|| PathBuf::from("known_hosts"));
+
+        // --- 查找已知主机条目 / Look up host in known_hosts ---
+        let host_key = format!("{}:{}", self.host, key_type);
+        let host_simple = self.host.clone();
+
+        // 读取 known_hosts，检查匹配 / Read known_hosts and check for match
+        let found = if kh_path.exists() {
+            std::fs::read_to_string(&kh_path).ok().and_then(|content| {
+                for line in content.lines() {
+                    let parts: Vec<&str> = line.splitn(3, ' ').collect();
+                    if parts.len() < 2 {
+                        continue;
+                    }
+                    let kh_host = parts[0];
+                    // 匹配 host 或 host:port / Match host or host:port
+                    if kh_host == host_simple || kh_host == host_key {
+                        // 提取已知的公钥数据 / Extract the known public key data
+                        if parts.len() >= 3 {
+                            let kh_key_data = parts[2];
+                            // 将当前服务器公钥序列化为相同格式 / Serialize current key in same format
+                            let current_key_data = format!(
+                                "{} {}",
+                                server_public_key.algorithm(),
+                                base64::engine::general_purpose::STANDARD
+                                    .encode(server_public_key.to_bytes().unwrap_or_default())
+                            );
+                            if current_key_data == kh_key_data {
+                                return Some(true); // 匹配 / Match
+                            } else {
+                                return Some(false); // 不匹配（可能的 MITM）/ Mismatch (possible MITM)
+                            }
+                        }
+                    }
+                }
+                None // 未找到条目 / Not found
+            })
+        } else {
+            None
+        };
+
+        match found {
+            Some(true) => {
+                // 密钥匹配，静默接受 / Key matches, accept silently
+                tracing::debug!("Host key verified for {}", self.host);
+                return Ok(true);
+            }
+            Some(false) => {
+                // 密钥不匹配！可能的中间人攻击 / Key changed! Possible MITM
+                tracing::warn!("Host key mismatch for {} — possible MITM attack", self.host);
+            }
+            None => {
+                // 新服务器，需要用户确认 / New server, needs user confirmation
+                tracing::info!("Unknown host key for {}", self.host);
+            }
+        }
+
+        // --- 弹窗让用户确认 / Prompt user via UI dialog ---
+        let (tx, rx) = oneshot::channel::<bool>();
+        let response = Arc::new(std::sync::Mutex::new(Some(tx)));
+
+        let key_changed = found == Some(false);
+        let _ = self.events.send(SessionEvent::HostKeyVerify {
+            host: self.host.clone(),
+            key_type: key_type.clone(),
+            fingerprint: fingerprint.clone(),
+            key_changed,
+            response: response.clone(),
+        });
+
+        // 等待用户响应 / Await user response
+        let accepted = match rx.await {
+            Ok(val) => val,
+            Err(_) => {
+                // channel 被丢弃，视为拒绝 / Channel dropped = reject
+                false
+            }
+        };
+
+        if accepted && !key_changed {
+            // 首次接受，保存到 known_hosts / First acceptance, save to known_hosts
+            if let Some(parent) = kh_path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let entry = format!(
+                "{} {} {}\n",
+                host_simple,
+                server_public_key.algorithm(),
+                base64::engine::general_purpose::STANDARD
+                    .encode(server_public_key.to_bytes().unwrap_or_default())
+            );
+            use std::io::Write;
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&kh_path)
+            {
+                let _ = f.write_all(entry.as_bytes());
+                tracing::info!("Saved host key for {} to {:?}", self.host, kh_path);
+            }
+        }
+
+        if !accepted {
+            if key_changed {
+                // 密钥变更，可能的中间人攻击 / Key changed, possible MITM
+                return Err(russh::Error::KeyChanged { line: 0 });
+            }
+            return Ok(false);
+        }
+
+        Ok(accepted)
     }
 
     async fn data(
