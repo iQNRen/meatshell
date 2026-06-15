@@ -983,16 +983,12 @@ pub fn run() -> Result<()> {
 
     // Load WebDAV settings into UI
     {
-        match crate::webdav::load_settings() {
-            Ok(s) => {
-                window.set_webdav_url(s.base_url.into());
-                window.set_webdav_username(s.username.into());
-                window.set_webdav_password(s.password.into());
-                window.set_webdav_enabled(s.enabled);
-                window.set_webdav_auto_sync(s.auto_sync);
-            }
-            Err(e) => tracing::warn!("load webdav settings: {e}"),
-        }
+        let s = crate::webdav::load_settings();
+        window.set_webdav_url(s.base_url.into());
+        window.set_webdav_username(s.username.into());
+        window.set_webdav_password(s.password.into());
+        window.set_webdav_enabled(s.enabled);
+        window.set_webdav_auto_sync(s.auto_sync);
     }
 
     // Open dialog
@@ -1009,12 +1005,15 @@ pub fn run() -> Result<()> {
     {
         let weak = window.as_weak();
         window.on_webdav_save_settings(move |url, user, pass, enabled, auto| {
+            // 加载现有配置，保留 last_sync_hash
+            let existing = crate::webdav::load_settings();
             let settings = crate::webdav::WebDavSettings {
                 enabled,
                 base_url: url.to_string(),
                 username: user.to_string(),
                 password: pass.to_string(),
                 auto_sync: auto,
+                last_sync_hash: existing.last_sync_hash,  // 保留上次同步记录
             };
             match crate::webdav::save_settings(&settings) {
                 Ok(()) => {
@@ -1039,10 +1038,7 @@ pub fn run() -> Result<()> {
             let Some(w) = weak.upgrade() else { return };
             w.set_webdav_busy(true);
             w.set_webdav_status("testing...".into());
-            let settings = match crate::webdav::load_settings() {
-                Ok(s) => s,
-                Err(e) => { w.set_webdav_status(format!("{e}").into()); w.set_webdav_busy(false); return; }
-            };
+            let settings = crate::webdav::load_settings();
             let weak2 = weak.clone();
             std::thread::spawn(move || {
                 let rt = tokio::runtime::Runtime::new().unwrap();
@@ -1067,10 +1063,7 @@ pub fn run() -> Result<()> {
             let Some(w) = weak.upgrade() else { return };
             w.set_webdav_busy(true);
             w.set_webdav_status("uploading...".into());
-            let settings = match crate::webdav::load_settings() {
-                Ok(s) => s,
-                Err(e) => { w.set_webdav_status(format!("{e}").into()); w.set_webdav_busy(false); return; }
-            };
+            let settings = crate::webdav::load_settings();
             let weak2 = weak.clone();
             std::thread::spawn(move || {
                 let rt = tokio::runtime::Runtime::new().unwrap();
@@ -1078,7 +1071,21 @@ pub fn run() -> Result<()> {
                 slint::invoke_from_event_loop(move || {
                     if let Some(w) = weak2.upgrade() {
                         match r {
-                            Ok(h) => w.set_webdav_status(format!("upload ok (sha256: {}…)", &h[..16]).into()),
+                            Ok(crate::webdav::SyncResult::Ok(h)) => {
+                                // 上传成功，更新 last_sync_hash
+                                w.set_webdav_status(format!("upload ok (sha256: {}…)", &h[..16]).into());
+                                update_sync_hash(&h);
+                            }
+                            Ok(crate::webdav::SyncResult::Conflict { local_hash, remote_hash }) => {
+                                // 检测到冲突
+                                w.set_webdav_status(format!(
+                                    "conflict! local={} remote={}", &local_hash[..8], &remote_hash[..8]
+                                ).into());
+                            }
+                            Ok(crate::webdav::SyncResult::Merged(h)) => {
+                                w.set_webdav_status(format!("merged (sha256: {}…)", &h[..16]).into());
+                                update_sync_hash(&h);
+                            }
                             Err(e) => w.set_webdav_status(format!("upload fail: {e}").into()),
                         }
                         w.set_webdav_busy(false);
@@ -1095,10 +1102,7 @@ pub fn run() -> Result<()> {
             let Some(w) = weak.upgrade() else { return };
             w.set_webdav_busy(true);
             w.set_webdav_status("downloading...".into());
-            let settings = match crate::webdav::load_settings() {
-                Ok(s) => s,
-                Err(e) => { w.set_webdav_status(format!("{e}").into()); w.set_webdav_busy(false); return; }
-            };
+            let settings = crate::webdav::load_settings();
             let weak2 = weak.clone();
             // store_dl 和 sessions_model_dl 不能 Send，所以不传进线程
             // 线程只传 Send 类型（weak2 是 Send 的）
@@ -1106,13 +1110,22 @@ pub fn run() -> Result<()> {
                 let rt = tokio::runtime::Runtime::new().unwrap();
                 let r = rt.block_on(crate::webdav::download(&settings));
                 let result_msg = match r {
-                    Ok(_) => "ok".to_string(),
+                    Ok(crate::webdav::SyncResult::Ok(h)) => format!("ok:{h}"),
+                    Ok(crate::webdav::SyncResult::Conflict { local_hash, remote_hash }) => {
+                        format!("conflict:{local_hash}:{remote_hash}")
+                    }
+                    Ok(crate::webdav::SyncResult::Merged(h)) => format!("merged:{h}"),
                     Err(e) => format!("fail:{e}"),
                 };
                 // 用 invoke_from_event_loop 回主线程，只传 Send 类型
                 slint::invoke_from_event_loop(move || {
                     if let Some(w) = weak2.upgrade() {
-                        if result_msg == "ok" {
+                        if result_msg.starts_with("ok:") || result_msg.starts_with("merged:") {
+                            // 提取 hash 并更新同步记录
+                            let hash = result_msg.split(':').nth(1).unwrap_or("");
+                            if !hash.is_empty() {
+                                update_sync_hash(hash);
+                            }
                             // 重载配置（在主线程，可以安全创建新 ConfigStore）
                             match crate::config::ConfigStore::load() {
                                 Ok(new_store) => {
@@ -1132,6 +1145,9 @@ pub fn run() -> Result<()> {
                                     w.set_webdav_status(format!("下载成功但重载失败: {e}").into());
                                 }
                             }
+                        } else if result_msg.starts_with("conflict:") {
+                            // 冲突提示
+                            w.set_webdav_status("远端有新版本，请选择覆盖或合并".into());
                         } else {
                             let err = result_msg.strip_prefix("fail:").unwrap_or(&result_msg);
                             w.set_webdav_status(format!("下载失败: {err}").into());
@@ -4071,6 +4087,13 @@ fn line_numbers_for(content: &str) -> String {
         let _ = write!(s, "{i}");
     }
     s
+}
+
+/// 更新 WebDAV 配置中的 last_sync_hash（同步成功后调用）
+fn update_sync_hash(hash: &str) {
+    let mut settings = crate::webdav::load_settings();
+    settings.last_sync_hash = hash.to_string();
+    let _ = crate::webdav::save_settings(&settings);
 }
 
 /// 解析 hex 颜色字符串（如 "#1a1b26"）为 slint::Color
