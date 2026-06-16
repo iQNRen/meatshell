@@ -223,3 +223,72 @@ jobs:
         with:
           files: ${{ env.MSI }}
           fail_on_unmatched_files: false
+
+  # 发布完成后自动更新 Homebrew Cask
+  update-homebrew:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout homebrew-tap
+        uses: actions/checkout@v4
+        with:
+          repository: iQNRen/homebrew-tap
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: homebrew-tap
+
+      - name: Update Cask
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          set -eu
+          VERSION="${GITHUB_REF_NAME#v}"
+          REPO="iQNRen/rusterm"
+
+          # 下载两个架构的 zip 并计算 sha256
+          echo "下载 macos-aarch64..."
+          curl -sL "https://github.com/${REPO}/releases/download/v${VERSION}/rusterm-v${VERSION}-macos-aarch64.zip" \
+            -o /tmp/rusterm-aarch64.zip
+          SHA_ARM=$(sha256sum /tmp/rusterm-aarch64.zip | awk '{print $1}')
+
+          echo "下载 macos-x86_64..."
+          curl -sL "https://github.com/${REPO}/releases/download/v${VERSION}/rusterm-v${VERSION}-macos-x86_64.zip" \
+            -o /tmp/rusterm-x86_64.zip
+          SHA_X86=$(sha256sum /tmp/rusterm-x86_64.zip | awk '{print $1}')
+
+          echo "aarch64: ${SHA_ARM}"
+          echo "x86_64:  ${SHA_X86}"
+
+          # 写入 cask 文件
+          cat > homebrew-tap/Casks/rusterm.rb <<EOF
+          cask "rusterm" do
+            version "${VERSION}"
+            sha256 :no_check
+
+            on_arm do
+              url "https://github.com/iQNRen/rusterm/releases/download/v#{version}/rusterm-v#{version}-macos-aarch64.zip"
+            end
+            on_intel do
+              url "https://github.com/iQNRen/rusterm/releases/download/v#{version}/rusterm-v#{version}-macos-x86_64.zip"
+            end
+
+            name "Rusterm"
+            desc "Lightweight Rust + Slint SSH/terminal client"
+            homepage "https://github.com/iQNRen/rusterm"
+
+            app "rusterm.app"
+
+            zap trash: [
+              "~/Library/Application Support/rusterm",
+              "~/.config/rusterm",
+            ]
+          end
+          EOF
+
+          # 提交并推送
+          cd homebrew-tap
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "rusterm v${VERSION}"
+          git push

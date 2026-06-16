@@ -1,5 +1,5 @@
 #!/bin/bash
-# 发布脚本：更新版本号、提交、打标签、推送
+# 发布脚本：更新版本号、提交、打标签、推送、更新 Homebrew
 # 用法: ./release.sh [patch|minor|major]
 
 set -e
@@ -31,4 +31,10 @@ git tag "v$NEW"
 git push origin rusterm
 git push origin "v$NEW"
 
+echo ""
 echo "已推送 v$NEW，GitHub Actions 将自动构建发布"
+echo ""
+echo "构建完成后，更新 Homebrew："
+echo "  cd ~/Desktop/myCodes/myProject/homebrew-tap"
+echo "  ./update-cask.sh $NEW"
+echo "  git add -A && git commit -m 'rusterm v$NEW' && git push"
