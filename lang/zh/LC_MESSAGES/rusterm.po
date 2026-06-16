@@ -147,6 +147,18 @@ msgstr "目录为空"
 msgid "Download"
 msgstr "下载"
 
+msgid "Close Tab"
+msgstr "关闭标签页"
+
+msgid "Close Other Tabs"
+msgstr "关闭其他标签页"
+
+msgid "Close Tabs to the Right"
+msgstr "关闭右侧标签页"
+
+msgid "Close All Tabs"
+msgstr "关闭所有标签页"
+
 msgid "Update available:"
 msgstr "发现新版本:"
 

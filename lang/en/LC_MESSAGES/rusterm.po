@@ -147,6 +147,18 @@ msgstr "Empty directory"
 msgid "Download"
 msgstr "Download"
 
+msgid "Close Tab"
+msgstr "Close Tab"
+
+msgid "Close Other Tabs"
+msgstr "Close Other Tabs"
+
+msgid "Close Tabs to the Right"
+msgstr "Close Tabs to the Right"
+
+msgid "Close All Tabs"
+msgstr "Close All Tabs"
+
 msgid "Update available:"
 msgstr "Update available:"
 

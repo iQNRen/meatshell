@@ -3055,6 +3055,160 @@ fn wire_tab_callbacks(
             }
         });
     }
+
+    // 右键菜单：关闭其他标签
+    {
+        let weak = window.as_weak();
+        let tabs_model = tabs_model.clone();
+        let terminals_model = terminals_model.clone();
+        let handles = handles.clone();
+        let bufs = bufs.clone();
+        let sftp_handles = sftp_handles.clone();
+        let sftp_last_cwd = sftp_last_cwd.clone();
+        window.on_close_other_tabs(move |keep_id: SharedString| {
+            let keep = keep_id.to_string();
+            // 收集要关闭的标签（除了 keep 和 welcome）
+            let to_close: Vec<String> = (0..tabs_model.row_count())
+                .filter_map(|i| tabs_model.row_data(i))
+                .filter(|r| r.id.as_str() != keep && r.id.as_str() != "welcome")
+                .map(|r| r.id.to_string())
+                .collect();
+            for id in to_close {
+                if let Some(handle) = handles.borrow_mut().remove(&id) {
+                    handle.close();
+                }
+                if let Some(sftp) = sftp_handles.lock().unwrap().remove(&id) {
+                    sftp.close();
+                }
+                sftp_last_cwd.lock().unwrap().remove(&id);
+                bufs.lock().unwrap().remove(&id);
+                // 从模型中移除
+                for i in (0..tabs_model.row_count()).rev() {
+                    if tabs_model.row_data(i).map(|r| r.id.as_str() == id).unwrap_or(false) {
+                        tabs_model.remove(i);
+                        break;
+                    }
+                }
+                for i in (0..terminals_model.row_count()).rev() {
+                    if terminals_model.row_data(i).map(|r| r.id.as_str() == id).unwrap_or(false) {
+                        terminals_model.remove(i);
+                        break;
+                    }
+                }
+            }
+            // 确保活动标签是 keep
+            if let Some(w) = weak.upgrade() {
+                w.set_active_tab_id(keep_id);
+            }
+        });
+    }
+
+    // 右键菜单：关闭右侧标签
+    {
+        let weak = window.as_weak();
+        let tabs_model = tabs_model.clone();
+        let terminals_model = terminals_model.clone();
+        let handles = handles.clone();
+        let bufs = bufs.clone();
+        let sftp_handles = sftp_handles.clone();
+        let sftp_last_cwd = sftp_last_cwd.clone();
+        window.on_close_right_tabs(move |from_id: SharedString| {
+            let from = from_id.to_string();
+            // 找到 from_id 的位置，关闭它右边的所有非 welcome 标签
+            let mut found = false;
+            let mut to_close = Vec::new();
+            for i in 0..tabs_model.row_count() {
+                if let Some(row) = tabs_model.row_data(i) {
+                    if row.id.as_str() == from {
+                        found = true;
+                        continue;
+                    }
+                    if found && row.id.as_str() != "welcome" {
+                        to_close.push(row.id.to_string());
+                    }
+                }
+            }
+            for id in to_close {
+                if let Some(handle) = handles.borrow_mut().remove(&id) {
+                    handle.close();
+                }
+                if let Some(sftp) = sftp_handles.lock().unwrap().remove(&id) {
+                    sftp.close();
+                }
+                sftp_last_cwd.lock().unwrap().remove(&id);
+                bufs.lock().unwrap().remove(&id);
+                for i in (0..tabs_model.row_count()).rev() {
+                    if tabs_model.row_data(i).map(|r| r.id.as_str() == id).unwrap_or(false) {
+                        tabs_model.remove(i);
+                        break;
+                    }
+                }
+                for i in (0..terminals_model.row_count()).rev() {
+                    if terminals_model.row_data(i).map(|r| r.id.as_str() == id).unwrap_or(false) {
+                        terminals_model.remove(i);
+                        break;
+                    }
+                }
+            }
+            // 确保活动标签有效
+            if let Some(w) = weak.upgrade() {
+                let active = w.get_active_tab_id().to_string();
+                let still_exists = (0..tabs_model.row_count())
+                    .any(|i| tabs_model.row_data(i).map(|r| r.id.as_str() == active).unwrap_or(false));
+                if !still_exists {
+                    w.set_active_tab_id(from_id);
+                }
+            }
+        });
+    }
+
+    // 右键菜单：关闭所有标签
+    {
+        let weak = window.as_weak();
+        let tabs_model = tabs_model.clone();
+        let terminals_model = terminals_model.clone();
+        let handles = handles.clone();
+        let bufs = bufs.clone();
+        let sftp_handles = sftp_handles.clone();
+        let sftp_last_cwd = sftp_last_cwd.clone();
+        window.on_close_all_tabs(move || {
+            // 关闭所有非 welcome 标签
+            let to_close: Vec<String> = (0..tabs_model.row_count())
+                .filter_map(|i| tabs_model.row_data(i))
+                .filter(|r| r.id.as_str() != "welcome")
+                .map(|r| r.id.to_string())
+                .collect();
+            for id in to_close {
+                if let Some(handle) = handles.borrow_mut().remove(&id) {
+                    handle.close();
+                }
+                if let Some(sftp) = sftp_handles.lock().unwrap().remove(&id) {
+                    sftp.close();
+                }
+                sftp_last_cwd.lock().unwrap().remove(&id);
+                bufs.lock().unwrap().remove(&id);
+            }
+            // 清空模型（保留 welcome）
+            while tabs_model.row_count() > 1 {
+                let mut found = false;
+                for i in 0..tabs_model.row_count() {
+                    if tabs_model.row_data(i).map(|r| r.id.as_str() != "welcome").unwrap_or(false) {
+                        tabs_model.remove(i);
+                        found = true;
+                        break;
+                    }
+                }
+                if !found { break; }
+            }
+            while terminals_model.row_count() > 0 {
+                terminals_model.remove(0);
+            }
+            // 回到欢迎页
+            if let Some(w) = weak.upgrade() {
+                w.set_active_tab_id("welcome".into());
+            }
+        });
+    }
 }
 
 // ---------------------------------------------------------------------------
