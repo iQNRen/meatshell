@@ -1,6 +1,6 @@
 [package]
 name = "rusterm"
-version = "0.5.9"
+version = "0.5.10"
 edition = "2021"
 authors = ["rusterm contributors"]
 description = "A FinalShell-style SSH/terminal client written in Rust + Slint"
