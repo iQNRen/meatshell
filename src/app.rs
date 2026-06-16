@@ -731,6 +731,61 @@ pub fn run() -> Result<()> {
         });
     }
 
+    // 检查更新（点击按钮时调用，检查 GitHub Releases）
+    {
+        let weak = window.as_weak();
+        window.on_check_for_updates(move || {
+            let Some(w) = weak.upgrade() else { return };
+            w.set_update_status(crate::i18n::t("检查中...", "checking...").into());
+
+            // 在新线程中检查 GitHub API
+            let weak2 = weak.clone();
+            std::thread::spawn(move || {
+                let rt = tokio::runtime::Runtime::new().unwrap();
+                let result = rt.block_on(check_github_update());
+
+                slint::invoke_from_event_loop(move || {
+                    if let Some(w) = weak2.upgrade() {
+                        match result {
+                            Ok(Some((version, url))) => {
+                                // 有新版本
+                                let msg = if crate::i18n::is_en() {
+                                    format!("New version v{} available, click to download", version)
+                                } else {
+                                    format!("发现新版本 v{}，点击下载", version)
+                                };
+                                w.set_update_status(msg.into());
+                                // 打开浏览器下载页面
+                                #[cfg(target_os = "macos")]
+                                let _ = std::process::Command::new("open").arg(&url).spawn();
+                                #[cfg(target_os = "linux")]
+                                let _ = std::process::Command::new("xdg-open").arg(&url).spawn();
+                                #[cfg(target_os = "windows")]
+                                let _ = std::process::Command::new("cmd").args(["/C", "start", &url]).spawn();
+                            }
+                            Ok(None) => {
+                                // 已是最新
+                                w.set_update_status(crate::i18n::t(
+                                    "已是最新版本 ✓",
+                                    "Already up to date ✓",
+                                ).into());
+                            }
+                            Err(e) => {
+                                // 检查失败
+                                let msg = if crate::i18n::is_en() {
+                                    format!("Check failed: {}", e)
+                                } else {
+                                    format!("检查失败: {}", e)
+                                };
+                                w.set_update_status(msg.into());
+                            }
+                        }
+                    }
+                }).ok();
+            });
+        });
+    }
+
     // 主机密钥验证回调
     {
         let weak = window.as_weak();
@@ -828,7 +883,51 @@ pub fn run() -> Result<()> {
         });
     }
 
-    // 更新检查已移除 — 版本固定为 v0.4.3
+    // --- In-app update check (#48) -----------------------------------------
+    // "Download" on the banner opens the latest-release page in the browser.
+    window.on_open_update_url(move || {
+        let url = "https://github.com/iqnren/rusterm/releases/latest";
+        #[cfg(windows)]
+        let _ = std::process::Command::new("explorer").arg(url).spawn();
+        #[cfg(target_os = "macos")]
+        let _ = std::process::Command::new("open").arg(url).spawn();
+        #[cfg(all(not(windows), not(target_os = "macos")))]
+        let _ = std::process::Command::new("xdg-open").arg(url).spawn();
+    });
+    // Query the GitHub releases API on a background thread; if a newer version
+    // exists, flip the banner on. Best-effort: any network/parse error is
+    // silently ignored and the app keeps working on the current version.
+    {
+        let weak = window.as_weak();
+        std::thread::spawn(move || {
+            let body = match ureq::get(
+                "https://api.github.com/repos/iqnren/rusterm/releases/latest",
+            )
+            .set("User-Agent", "rusterm-update-check")
+            .timeout(std::time::Duration::from_secs(8))
+            .call()
+            {
+                Ok(resp) => resp.into_string().unwrap_or_default(),
+                Err(_) => return,
+            };
+            let json: serde_json::Value = match serde_json::from_str(&body) {
+                Ok(v) => v,
+                Err(_) => return,
+            };
+            let tag = json["tag_name"].as_str().unwrap_or("").to_string();
+            let newer = matches!(
+                (parse_version(&tag), parse_version(env!("CARGO_PKG_VERSION"))),
+                (Some(latest), Some(cur)) if latest > cur
+            );
+            if !newer {
+                return;
+            }
+            let _ = weak.upgrade_in_event_loop(move |w| {
+                w.set_update_version(tag.into());
+                w.set_update_available(true);
+            });
+        });
+    }
 
     // Transfer records (download/upload progress + history) shown in the popup.
     let transfers_model: Rc<VecModel<TransferInfo>> = Rc::new(VecModel::default());
@@ -4113,6 +4212,67 @@ fn update_sync_hash(hash: &str) {
     let mut settings = crate::webdav::load_settings();
     settings.last_sync_hash = hash.to_string();
     let _ = crate::webdav::save_settings(&settings);
+}
+
+/// 检查 GitHub Releases 是否有新版本
+///
+/// 返回 Ok(Some((version, download_url))) 如果有新版本
+/// 返回 Ok(None) 如果已是最新
+async fn check_github_update() -> anyhow::Result<Option<(String, String)>> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .user_agent("rusterm-update-checker")
+        .build()?;
+
+    let resp = client
+        .get("https://api.github.com/repos/iQNRen/rusterm/releases/latest")
+        .send()
+        .await?;
+
+    if !resp.status().is_success() {
+        anyhow::bail!("GitHub API returned {}", resp.status());
+    }
+
+    let release: serde_json::Value = resp.json().await?;
+
+    let latest_tag = release["tag_name"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("no tag_name in response"))?;
+
+    let latest_version = latest_tag.trim_start_matches('v');
+    let current_version = env!("CARGO_PKG_VERSION");
+
+    tracing::info!("update check: current={}, latest={}", current_version, latest_version);
+
+    // 简单版本比较（按 . 分割逐段比较）
+    if version_greater(latest_version, current_version) {
+        // 获取下载页面 URL
+        let html_url = release["html_url"]
+            .as_str()
+            .unwrap_or("https://github.com/iQNRen/rusterm/releases/latest")
+            .to_string();
+        Ok(Some((latest_version.to_string(), html_url)))
+    } else {
+        Ok(None)
+    }
+}
+
+/// 简单版本比较：a > b 返回 true
+fn version_greater(a: &str, b: &str) -> bool {
+    let a_parts: Vec<u32> = a.split('.').filter_map(|p| p.parse().ok()).collect();
+    let b_parts: Vec<u32> = b.split('.').filter_map(|p| p.parse().ok()).collect();
+
+    for i in 0..a_parts.len().max(b_parts.len()) {
+        let a_num = a_parts.get(i).copied().unwrap_or(0);
+        let b_num = b_parts.get(i).copied().unwrap_or(0);
+        if a_num > b_num {
+            return true;
+        }
+        if a_num < b_num {
+            return false;
+        }
+    }
+    false
 }
 
 /// 解析 hex 颜色字符串为 slint::Color
