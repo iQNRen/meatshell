@@ -121,6 +121,18 @@ fn default_stop_bits() -> u8 {
 fn default_parity() -> String {
     "none".to_string()
 }
+fn default_sidebar_width() -> f32 {
+    220.0
+}
+fn default_sidebar_height() -> f32 {
+    240.0
+}
+fn default_sftp_width() -> f32 {
+    380.0
+}
+fn default_sftp_height() -> f32 {
+    220.0
+}
 fn default_flow() -> String {
     "none".to_string()
 }
@@ -207,6 +219,9 @@ pub struct Session {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct PortForward {
     pub kind: String,
+    /// Optional label to tell rules apart (#100). Empty = unnamed.
+    #[serde(default)]
+    pub name: String,
     /// Listener bind address (local side for L/D, remote side for R).
     /// Empty → 127.0.0.1.
     #[serde(default)]
@@ -250,6 +265,9 @@ impl Session {
 pub struct QuickCommand {
     pub name: String,
     pub command: String,
+    /// Optional group/folder name. Empty = the implicit "default" group (#55).
+    #[serde(default)]
+    pub group: String,
 }
 
 /// 快捷键配置结构体
@@ -310,6 +328,9 @@ pub struct ConfigFile {
     /// Terminal font size in px. 0 = the built-in default.
     #[serde(default)]
     pub font_size: u32,
+    /// Global UI scale in percent (#100). 0 = default (100%).
+    #[serde(default)]
+    pub ui_scale: u32,
     /// Explicit session groups/folders (#41), including empty ones so a folder
     /// can exist before any session is moved into it. "default" is implicit and
     /// not stored here.
@@ -327,12 +348,39 @@ pub struct ConfigFile {
     /// Saved quick commands (#55).
     #[serde(default)]
     pub quick_commands: Vec<QuickCommand>,
+    /// Explicit quick-command group names — mirrors `groups` for sessions so that
+    /// empty quick-command groups survive and can be renamed/deleted (#55).
+    #[serde(default)]
+    pub quick_groups: Vec<String>,
     /// Recent commands sent from the command box, oldest first, capped (#55).
     #[serde(default)]
     pub command_history: Vec<String>,
     /// Collapse the left resource sidebar on startup (#78).
     #[serde(default)]
     pub collapse_sidebar_default: bool,
+    /// User-adjustable width of the left resource sidebar, in logical pixels.
+    /// Persisted across restarts so the drag-resized width sticks.
+    #[serde(default = "default_sidebar_width")]
+    pub sidebar_width: f32,
+    /// Resource-panel docking: size when docked top/bottom, and which edge it is
+    /// docked to (left|right|top|bottom). Persisted so the layout sticks (#dock).
+    #[serde(default = "default_sidebar_height")]
+    pub sidebar_height: f32,
+    #[serde(default)]
+    pub sidebar_dock: String,
+    /// SFTP-panel docking: extents (px) and docked edge, persisted (#dock).
+    #[serde(default = "default_sftp_width")]
+    pub sftp_panel_width: f32,
+    #[serde(default = "default_sftp_height")]
+    pub sftp_panel_height: f32,
+    #[serde(default)]
+    pub sftp_dock: String,
+    /// Last window size in logical px (0 = unset → use the built-in default).
+    /// Lets users keep their preferred window size across restarts.
+    #[serde(default)]
+    pub window_width: f32,
+    #[serde(default)]
+    pub window_height: f32,
     /// Collapse the bottom SFTP panel on startup (#78).
     #[serde(default)]
     pub collapse_sftp_default: bool,
@@ -622,6 +670,19 @@ impl ConfigStore {
         self.cache.font_size = size.clamp(8, 32);
     }
 
+    /// Global UI scale in percent (#100). Defaults to 100.
+    pub fn ui_scale(&self) -> u32 {
+        if self.cache.ui_scale == 0 {
+            100
+        } else {
+            self.cache.ui_scale
+        }
+    }
+
+    pub fn set_ui_scale(&mut self, percent: u32) {
+        self.cache.ui_scale = percent.clamp(80, 200);
+    }
+
     /// 自定义终端背景颜色（hex 字符串，如 "#1a1b26"）。空字符串 = 使用默认。
     pub fn term_bg_color(&self) -> &str {
         &self.cache.term_bg_color
@@ -670,7 +731,6 @@ impl ConfigStore {
             _ => tracing::warn!("unknown hotkey action: {}", action),
         }
     }
-
     /// Whether the SFTP panel follows the terminal's cd (default true).
     pub fn sftp_follow_cd(&self) -> bool {
         !self.cache.sftp_no_follow_cd
@@ -687,6 +747,61 @@ impl ConfigStore {
 
     pub fn set_quick_commands(&mut self, cmds: Vec<QuickCommand>) {
         self.cache.quick_commands = cmds;
+    }
+
+    /// Explicit quick-command groups (#55) — parallels [`groups`](Self::groups).
+    pub fn quick_groups(&self) -> &[String] {
+        &self.cache.quick_groups
+    }
+
+    /// Create an empty quick-command group. Ignores blank, "default", duplicates.
+    pub fn add_quick_group(&mut self, name: String) {
+        let n = name.trim().to_string();
+        if n.is_empty() || n.eq_ignore_ascii_case("default") {
+            return;
+        }
+        if !self.cache.quick_groups.iter().any(|g| g == &n) {
+            self.cache.quick_groups.push(n);
+        }
+    }
+
+    /// Delete a quick-command group; any command still in it falls back to
+    /// ungrouped (the UI only offers delete on empty groups, but clear defensively).
+    pub fn remove_quick_group(&mut self, name: &str) {
+        self.cache.quick_groups.retain(|g| g != name);
+        for c in &mut self.cache.quick_commands {
+            if c.group == name {
+                c.group.clear();
+            }
+        }
+    }
+
+    /// Rename a quick-command group, moving its commands along. No-op for
+    /// blank / "default".
+    pub fn rename_quick_group(&mut self, old: &str, new: String) {
+        let n = new.trim().to_string();
+        if n.is_empty() || n.eq_ignore_ascii_case("default") || n == old {
+            return;
+        }
+        for g in &mut self.cache.quick_groups {
+            if g == old {
+                *g = n.clone();
+            }
+        }
+        for c in &mut self.cache.quick_commands {
+            if c.group == old {
+                c.group = n.clone();
+            }
+        }
+        self.cache.quick_groups.sort();
+        self.cache.quick_groups.dedup();
+    }
+
+    /// Update one quick command in place by index (#55).
+    pub fn update_quick_command(&mut self, index: usize, cmd: QuickCommand) {
+        if let Some(slot) = self.cache.quick_commands.get_mut(index) {
+            *slot = cmd;
+        }
     }
 
     /// Recent command-box history, oldest first (#55).
@@ -726,6 +841,68 @@ impl ConfigStore {
 
     pub fn set_collapse_sidebar_default(&mut self, v: bool) {
         self.cache.collapse_sidebar_default = v;
+    }
+
+    /// Persisted sidebar width in logical px. Falls back to the default when the
+    /// stored value is unset/zero (e.g. a config created via `Default`).
+    pub fn sidebar_width(&self) -> f32 {
+        let w = self.cache.sidebar_width;
+        if w <= 0.0 {
+            default_sidebar_width()
+        } else {
+            w
+        }
+    }
+
+    pub fn set_sidebar_width(&mut self, v: f32) {
+        self.cache.sidebar_width = v;
+    }
+
+    /// Resource / SFTP panel docking geometry, persisted across restarts (#dock).
+    /// Sizes fall back to their defaults when unset/zero; docks fall back to a
+    /// sensible edge when the stored string is empty.
+    pub fn sidebar_height(&self) -> f32 {
+        let h = self.cache.sidebar_height;
+        if h <= 0.0 { default_sidebar_height() } else { h }
+    }
+    pub fn set_sidebar_height(&mut self, v: f32) {
+        self.cache.sidebar_height = v;
+    }
+    pub fn sidebar_dock(&self) -> String {
+        let d = self.cache.sidebar_dock.trim();
+        if d.is_empty() { "left".into() } else { d.to_string() }
+    }
+    pub fn set_sidebar_dock(&mut self, v: String) {
+        self.cache.sidebar_dock = v;
+    }
+    pub fn sftp_panel_width(&self) -> f32 {
+        let w = self.cache.sftp_panel_width;
+        if w <= 0.0 { default_sftp_width() } else { w }
+    }
+    pub fn set_sftp_panel_width(&mut self, v: f32) {
+        self.cache.sftp_panel_width = v;
+    }
+    pub fn sftp_panel_height(&self) -> f32 {
+        let h = self.cache.sftp_panel_height;
+        if h <= 0.0 { default_sftp_height() } else { h }
+    }
+    pub fn set_sftp_panel_height(&mut self, v: f32) {
+        self.cache.sftp_panel_height = v;
+    }
+    pub fn sftp_dock(&self) -> String {
+        let d = self.cache.sftp_dock.trim();
+        if d.is_empty() { "bottom".into() } else { d.to_string() }
+    }
+    pub fn set_sftp_dock(&mut self, v: String) {
+        self.cache.sftp_dock = v;
+    }
+    /// Last window size in logical px; `(0,0)` means unset (use the default).
+    pub fn window_size(&self) -> (f32, f32) {
+        (self.cache.window_width, self.cache.window_height)
+    }
+    pub fn set_window_size(&mut self, w: f32, h: f32) {
+        self.cache.window_width = w;
+        self.cache.window_height = h;
     }
 
     /// Collapse the SFTP panel on startup (default false) (#78).

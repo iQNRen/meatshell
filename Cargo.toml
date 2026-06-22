@@ -11,6 +11,12 @@ rust-version = "1.75"
 
 [dependencies]
 slint = { version = "1.8", features = ["compat-1-2"] }
+# ICU4X (pulled in by Slint's text layout) spams stderr with raw `eprintln!`
+# ("ICU4X data error: No segmentation model for language: ja") because its
+# `log` shim falls back to eprintln when the `logging` feature is off. Turning
+# `logging` on routes those through the real `log` crate → our tracing
+# subscriber, where init_tracing silences the `icu_provider` target.
+icu_provider = { version = "2", features = ["logging"] }
 # Direct access to the winit window/events (OS file-drop for drag-and-drop upload).
 i-slint-backend-winit = "1.16"
 serde = { version = "1", features = ["derive"] }
@@ -59,7 +65,6 @@ dark-light = "1"
 # in-app update check against the GitHub releases API (#48). Runs on a
 # background thread so it never blocks startup; failure is silently ignored.
 ureq = { version = "2", features = ["tls"] }
-icu_provider = { version = "2.2.0", features = ["logging"] }
 
 # Decode the embedded PNG icon to set the window icon at runtime (Linux only).
 # On Windows the icon comes from the .ico embedded by winresource at link time;
@@ -71,6 +76,12 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 # Feature is additive over the base `arboard = "3"` dependency above.
 arboard = { version = "3", features = ["wayland-data-control"] }
 
+# Compile the Skia renderer in *only* on macOS (feature is additive over the base
+# slint dependency) so users can opt into it at launch with SLINT_BACKEND=winit-skia.
+# The default stays femtovg — see the renderer history note in main.rs (#108/#129).
+# Windows/Linux never compile Skia.
+[target.'cfg(target_os = "macos")'.dependencies]
+slint = { version = "1.8", features = ["renderer-skia"] }
 
 [build-dependencies]
 slint-build = "1.8"

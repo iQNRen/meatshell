@@ -2,8 +2,13 @@
 // Embedding means Windows / Linux / macOS all render the same glyphs without
 // relying on Consolas / Segoe MDL2 Assets being installed.
 //
-// Cascadia Mono: full box-drawing + block-elements + braille (needed by btop
-//   for its sparkline graphs; JetBrains Mono lacks braille → garbled output).
+// "Meatshell Mono" is Cascadia Mono re-named to a unique family (#114): full
+//   box-drawing + block-elements + braille (needed by htop/btop graphs). The
+//   original "Cascadia Mono" name collides with the system font family, so on a
+//   machine without Cascadia installed (e.g. Win11 Home) the OS font matcher
+//   substituted a glyph-poor fallback and box/braille rendered as tofu. A unique
+//   name (like Material Icons) can't be shadowed, so the embedded font is always
+//   used.
 // Material Icons: open-source icon font replacing Windows-only Segoe MDL2 Assets.
 import "fonts/MeatshellMono-Regular.ttf";
 import "fonts/MeatshellMono-Bold.ttf";
@@ -15,11 +20,16 @@ import { TabBar, TabInfo } from "tabs.slint";
 import { Welcome, SessionInfo } from "welcome.slint";
 import { SessionDialog, SessionDraft, PortFwd } from "session_dialog.slint";
 import { WebDavDialog } from "webdav_dialog.slint";
-import { ConfirmDialog } from "confirm_dialog.slint";
 import { HostKeyDialog } from "host_key_dialog.slint";
+import { ConfirmDialog } from "confirm_dialog.slint";
+import { LabeledInput, PrimaryButton, GhostButton } from "widgets.slint";
 import { TerminalView, TermSpan, TermMatch, QuickCmd } from "terminal_view.slint";
 import { SftpEntry, SftpTreeNode } from "sftp_panel.slint";
-import { ComboBox, SpinBox, LineEdit, Button, ScrollView, CheckBox } from "std-widgets.slint";
+import { ProcWindow, ProcRow } from "proc_window.slint";
+import { InterfacePanel } from "interface_panel.slint";
+// Re-export so `slint::include_modules!` generates the ProcWindow Rust type.
+export { ProcWindow }
+import { ComboBox, SpinBox, LineEdit, Button, ScrollView, CheckBox, Palette } from "std-widgets.slint";
 
 export { SessionInfo, SessionDraft, TabInfo, SftpEntry, SftpTreeNode, QuickCmd, PortFwd }
 
@@ -37,15 +47,7 @@ export struct TransferInfo {
     is-upload: bool,
 }
 
-// One row in the process-monitor popup (#23).
-export struct ProcRow {
-    pid: string,
-    user: string,
-    cpu: string,       // "12.3" (percent, one decimal)
-    mem: string,       // "4.5"
-    command: string,   // truncated args
-    cpu-frac: float,   // 0.0..1.0, drives the row load bar
-}
+// ProcRow now lives in proc_window.slint (the detachable process window).
 
 export struct TerminalState {
     id: string,
@@ -54,6 +56,8 @@ export struct TerminalState {
     cursor-row: int,       // cursor cell on the grid
     cursor-col: int,
     rows-used: int,        // content rows, for viewport sizing
+    scroll-max: int,       // scrollback depth (max offset) — terminal scrollbar (#103)
+    scroll-offset: int,    // current scrollback offset (0 = live bottom)
     is-alt-screen: bool,
     find-matches: [TermMatch], // search-highlight rectangles
     selection: [TermMatch],    // drag-selection highlight rectangles
@@ -64,15 +68,130 @@ export struct TerminalState {
     sftp-status: string,
     sftp-loading: bool,
     sftp-tree-nodes: [SftpTreeNode],
+    sftp-selected-count: int,   // checked entries in the SFTP panel (#100)
+}
+
+// A 26×26 top-bar icon button with a hover tooltip (right-aligned so it never
+// runs off the window edge). `active` keeps the hover background lit (e.g. while
+// its popup is open).
+// A Windows-style window-control button (minimize / maximize / close) for the
+// custom title bar (#119). `danger` gives the close button its red hover.
+component WinBtn inherits Rectangle {
+    in property <string> icon;
+    in property <bool> danger: false;
+    callback clicked();
+    width: 46px;
+    background: ta.has-hover ? (root.danger ? #e81123 : Theme.bg-hover) : transparent;
+    animate background { duration: 90ms; }
+    ta := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+    Text {
+        text: root.icon;
+        font-family: "Material Icons";
+        color: (root.danger && ta.has-hover) ? white : Theme.text-secondary;
+        font-size: 16px;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}
+
+component IconBtn inherits Rectangle {
+    in property <string> icon;
+    in property <brush> icon-color: Theme.text-secondary;
+    in property <string> tooltip;
+    in property <bool> active;
+    callback clicked();
+    width: 26px;
+    height: 26px;
+    border-radius: Theme.radius-sm;
+    background: ta.has-hover || root.active ? Theme.bg-hover : transparent;
+    ta := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+    Text {
+        text: root.icon;
+        font-family: "Material Icons";
+        color: root.icon-color;
+        font-size: Theme.fs-md;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+    if ta.has-hover && root.tooltip != "" : Rectangle {
+        y: parent.height + 5px;
+        x: parent.width - self.width;   // align right edge with the icon
+        width: tip-txt.preferred-width + 16px;
+        height: 22px;
+        background: Theme.bg-elevated;
+        border-radius: Theme.radius-sm;
+        border-width: 1px;
+        border-color: Theme.border-strong;
+        drop-shadow-blur: 8px;
+        drop-shadow-color: #00000070;
+        tip-txt := Text {
+            text: root.tooltip;
+            color: Theme.text-primary;
+            font-size: Theme.fs-xs;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+            width: parent.width;
+            height: parent.height;
+        }
+    }
+}
+
+// One row in the keyboard-shortcuts dialog: a key chip + a description (#103).
+component ShortcutRow inherits Rectangle {
+    in property <string> keys;
+    in property <string> desc;
+    height: 28px;
+    HorizontalLayout {
+        spacing: 10px;
+        Rectangle {
+            width: 116px;
+            chip := Rectangle {
+                x: 0;
+                y: (parent.height - self.height) / 2;
+                width: min(parent.width, kt.preferred-width + 16px);
+                height: 20px;
+                background: Theme.bg-root;
+                border-radius: Theme.radius-sm;
+                border-width: 1px;
+                border-color: Theme.border-strong;
+                kt := Text {
+                    text: root.keys;
+                    color: Theme.text-primary;
+                    font-family: Theme.font-mono;
+                    font-size: Theme.fs-xs;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                    width: parent.width;
+                    height: parent.height;
+                }
+            }
+        }
+        Text {
+            text: root.desc;
+            color: Theme.text-secondary;
+            font-size: Theme.fs-sm;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+        }
+    }
 }
 
 export component AppWindow inherits Window {
     title: "rusterm";
     icon: @image-url("../assets/icon.png");
+    // Frameless when we draw our own title bar (#119); Rust sets custom-titlebar
+    // true on Windows/Linux. Slint maps no-frame → winit set_decorations(false).
+    no-frame: root.custom-titlebar;
     min-width: 960px;
     min-height: 600px;
-    preferred-width: 1200px;
-    preferred-height: 760px;
+    preferred-width: 1440px;
+    preferred-height: 900px;
     background: Theme.bg-root;
     // A CJK-capable default so UI text (incl. fullwidth punctuation like ：（）)
     // never tofus on glyph fallback (#54). Rust sets Theme.ui-font-family to a
@@ -107,74 +226,118 @@ export component AppWindow inherits Window {
     // --- Top-right popups --------------------------------------------------
     in-out property <bool> download-open: false;  // download manager popup
     in-out property <bool> settings-open: false;  // settings menu popup
-    in-out property <bool> sidebar-collapsed: false; // left panel hidden
-    in-out property <bool> about-open: false;     // centered About dialog
 
-    // 主机密钥验证对话框
-    in-out property <bool> host-key-open: false;
-    in-out property <string> host-key-host: "";
-    in-out property <string> host-key-type: "";
-    in-out property <string> host-key-fingerprint: "";
-    in-out property <bool> host-key-changed: false;
-    callback host-key-accepted();
-    callback host-key-rejected();
+    // Immersive custom title bar (#119). Rust sets `custom-titlebar` true on
+    // Windows/Linux (frameless); macOS keeps native decorations. The callbacks
+    // drive the winit window via Rust.
+    // Default true so the window is frameless from creation (no native-bar flash);
+    // Rust sets it false on macOS, which keeps native decorations.
+    in-out property <bool> custom-titlebar: true;
+    in-out property <bool> window-maximized: false;
+    callback win-minimize();
+    callback win-maximize-toggle();
+    callback win-close();
+    callback win-drag();          // start an OS window-move
+    callback win-resize(int);     // start an OS resize; arg = direction code
+    in-out property <bool> sidebar-collapsed: false; // left panel hidden
+    // User-draggable size of the resource sidebar. width is used when docked
+    // left/right, height when docked top/bottom. Seeded / persisted via the
+    // persist-* callbacks (fired on drag end).
+    in-out property <length> sidebar-width: 220px;
+    in-out property <length> sidebar-height: 240px;
+    property <bool> sidebar-dragging;            // splitter being dragged
+    property <length> sidebar-drag-start-x;      // mouse-x at drag start
+    property <length> sidebar-drag-start-y;      // mouse-y at drag start
+    callback persist-sidebar-width(float /* logical px */);
+
+    // --- Panel docking (resource sidebar; SFTP follows in a later phase) ----
+    // Which window edge the resource panel is docked to: left|right|top|bottom.
+    in-out property <string> sidebar-dock: "left";
+    property <bool> sidebar-horizontal: root.sidebar-dock == "left" || root.sidebar-dock == "right";
+    // Drag-to-dock state: while a panel's header is dragged, a 4-edge snap
+    // overlay shows and `dock-target` tracks the edge under the cursor.
+    property <bool> panel-dragging;
+    property <float> drag-nx;   // cursor x within the dock area, 0..1
+    property <float> drag-ny;   // cursor y within the dock area, 0..1
+    property <string> dock-target:
+        !root.panel-dragging ? ""
+        : root.drag-nx < 0.22 ? "left"
+        : root.drag-nx > 0.78 ? "right"
+        : root.drag-ny < 0.22 ? "top"
+        : root.drag-ny > 0.78 ? "bottom"
+        : "";
+    callback persist-sidebar-dock(string);
+    // The top-right toolbar icons float over the tab row; when the sidebar docks
+    // top/right it covers that corner, so shift the icons to stay over the tabs.
+    property <length> toolbar-x-off:
+        (root.sidebar-dock == "right" && !root.sidebar-collapsed) ? root.sidebar-width + 4px : 0px;
+    property <length> toolbar-y-off:
+        (root.sidebar-dock == "top" && !root.sidebar-collapsed) ? root.sidebar-height + 4px : 0px;
+    in-out property <bool> about-open: false;     // centered About dialog
+    in-out property <bool> shortcuts-open: false; // centered keyboard-shortcuts dialog (#103)
     in property <string> download-dir;      // preset SFTP download folder ("" = ask)
-    in-out property <bool> proc-open: false; // process monitor popup (#23)
+    // Process monitor is now a detachable top-level window (ProcWindow). Rust
+    // shows/hides it in response to open-processes(); proc-list/proc-available
+    // stay here as the live data source shared with that window (#23).
+    callback open-processes();
     in property <bool> proc-available;       // a live remote session is active
     in property <[ProcRow]> proc-list;       // top remote processes by CPU
     // Command bar (#55): quick commands + history, fed from Rust.
     in property <[QuickCmd]> quick-commands;
-    in property <[string]> command-history;          // newest first
+    in property <[string]> command-history;          // oldest first (newest last, #113)
+    in property <[string]> history-view;             // filtered dropdown list (#101)
     callback run-command(string /* tab-id */, string /* cmd */, bool /* to-all */);
     callback copy-text(string);                 // copy a history command (#96)
     callback delete-history(int /* index */);   // remove a history entry (#96)
+    callback delete-history-cmd(string /* cmd */);   // remove a history entry by command (#101)
+    callback search-history(string /* query */);     // filter the history dropdown (#101)
     in-out property <bool> quick-cmd-manage-open: false;  // manage dialog
-    property <string> qcm-name;                       // manage form: name field
-    property <string> qcm-command;                    // manage form: command field
-    callback add-quick-command(string /* name */, string /* command */);
+    in-out property <string> qcm-name;                // manage form: name field
+    in-out property <string> qcm-command;             // manage form: command field
+    in-out property <string> qcm-group;               // manage form: group field (#55)
+    in-out property <int> qcm-edit-index: -1;         // -1 = add, >=0 = edit that entry (#55)
+    callback add-quick-command(string /* name */, string /* command */, string /* group */);
+    callback save-quick-command(int /* index */, string /* name */, string /* command */, string /* group */);
     callback delete-quick-command(int /* index */);
+    callback edit-quick-command(int /* index */);
+    callback duplicate-quick-command(int /* index */);
+    callback move-quick-command(int /* index */, string /* group */);
+    callback toggle-quick-group(string /* group */);  // collapse/expand a group (#55)
+    // Quick-command group management (mirror session groups) (#55).
+    in-out property <bool> qcg-open: false;           // group name dialog open
+    property <string> qcg-name;                       // group dialog: name field
+    property <string> qcg-orig;                       // group dialog: "" = new, else rename target
+    callback submit-quick-group(string /* orig */, string /* name */);
+    callback delete-quick-group(string /* name */);
     in property <[TransferInfo]> transfers; // download/upload records (newest first)
     in property <[string]> about-libs;      // open-source libraries used
     in-out property <bool> lang-en: false;  // current UI language (false = 中文)
     // Two-way binding to Theme.dark — Rust reads/writes this property and
     // Slint propagates it to every widget that references Theme colours.
     in-out property <bool> dark-mode <=> Theme.dark;
+    // Keep Slint's std-widgets (LineEdit / Button / ComboBox in the dialogs) in
+    // step with our theme — otherwise in light mode they keep the platform/dark
+    // palette and their text/borders blend into the light dialog background.
+    init => { Palette.color-scheme = root.dark-mode ? ColorScheme.dark : ColorScheme.light; }
+    changed dark-mode => { Palette.color-scheme = root.dark-mode ? ColorScheme.dark : ColorScheme.light; }
     in-out property <string> term-font-family <=> Theme.term-font-family;
     in-out property <length> term-font-size <=> Theme.term-font-size;
+    in-out property <float> ui-scale <=> Theme.ui-scale;   // global UI zoom (#100)
     in-out property <string> ui-font-family <=> Theme.ui-font-family;
     in property <[string]> term-fonts;             // installed monospace families
-    property <string> term-sub-tab: "bg";  // 终端设置子标签: "bg" | "font"
-
-    // 终端背景自定义
-    in-out property <brush> term-bg-override <=> Theme.term-bg-override;  // 自定义背景色
-    in-out property <image> term-bg-image-src <=> Theme.term-bg-image-src; // 背景图片
-    in-out property <float> term-bg-opacity <=> Theme.term-bg-opacity;     // 背景图透明度
-    in property <[brush]> bg-color-presets;        // 预设背景色列表
-    callback set-term-bg-color(int);               // 设置自定义背景色（索引，-1=默认）
-    callback set-term-bg-opacity(float);           // 设置背景图透明度
-    callback pick-bg-image();                      // 打开文件选择器
-    callback clear-bg-image();                     // 清除背景图
-    in-out property <string> term-bg-hex-input: ""; // 背景色 hex 输入框文本
-    callback set-term-bg-color-hex(string);        // 设置自定义背景色（hex 字符串）
-
-    // 终端字体颜色自定义
-    in-out property <brush> term-fg-override <=> Theme.term-fg-override;  // 自定义字体颜色
-    in property <[brush]> fg-color-presets;        // 预设字体颜色列表
-    callback set-term-fg-color(int);               // 设置自定义字体颜色（索引，-1=默认）
-    in-out property <string> term-fg-hex-input: ""; // 字体颜色 hex 输入框文本
-    callback set-term-fg-color-hex(string);        // 设置自定义字体颜色（hex 字符串）
-    in-out property <bool> interface-open: false;  // Interface settings dialog
-    // Interface dialog position (draggable by its title bar); init centered.
-    property <length> ifd-x: (root.width - 644px) / 2;
-    property <length> ifd-y: (root.height - 414px) / 2;
+    in-out property <bool> interface-open: false;  // Interface settings overlay
+    // Interface card position (draggable by its title bar, clamped inside the
+    // window so it can't leave the parent); init centered.
+    property <length> ifd-x: (root.width - 660px) / 2;
+    property <length> ifd-y: (root.height - 430px) / 2;
     property <bool> ifd-dragging;
     property <length> ifd-base-x;
     property <length> ifd-base-y;
     property <length> ifd-grab-x;
     property <length> ifd-grab-y;
-    property <string> ifd-page: "font";   // active Interface page: "font" | "sftp" | "sidebar" | "download"
     callback set-term-font(string);                // apply + persist font family
     callback set-term-font-size(int);              // apply + persist font size (px)
+    callback set-ui-scale(int);                    // apply + persist UI scale (percent) (#100)
     // SFTP follows the terminal's cd; opt out in Interface settings.
     in-out property <bool> sftp-follow-cd: true;
     callback set-sftp-follow-cd(bool);             // apply + persist
@@ -192,6 +355,28 @@ export component AppWindow inherits Window {
     // double-click on the title-bar icon / X shouldn't drop active sessions.
     in-out property <bool> confirm-close-open: false;
     callback confirm-close-yes();                  // quit the app for real
+    // Host-key confirmation (#109-5). Rust opens this when a server presents an
+    // unknown / changed host key; the user's answer flows back via the callbacks
+    // and Rust closes the dialog.
+    in-out property <bool> hostkey-prompt-open: false;
+    in-out property <bool> hostkey-changed: false; // true = key differs from stored
+    in-out property <string> hostkey-title;
+    in-out property <string> hostkey-message;
+    in-out property <string> hostkey-detail;       // host:port + type + fingerprint
+    in-out property <string> hostkey-confirm-label; // trust-button text (from Rust, bilingual)
+    callback hostkey-accept();                     // trust (and remember) the key
+    callback hostkey-reject();                      // abort the connection
+    // Connect-time credential prompt (#110). Rust opens this when a session is
+    // missing its username and/or password; the answer flows back via accept.
+    in-out property <bool> cred-prompt-open: false;
+    in-out property <string> cred-host;            // host shown in the dialog title
+    in-out property <bool> cred-need-user: false;
+    in-out property <bool> cred-need-password: false;
+    in-out property <string> cred-user;            // username field value
+    in-out property <string> cred-password;        // password field value
+    in-out property <bool> cred-remember: false;   // persist to the saved session
+    callback cred-accept();                        // use the entered credentials
+    callback cred-reject();                        // cancel the connection
     // Group create / rename dialog (#41).
     in-out property <bool> group-dialog-open: false;
     in-out property <string> group-dialog-orig;    // "" = create, else rename
@@ -199,22 +384,84 @@ export component AppWindow inherits Window {
     callback delete-group(string /* name */);
     callback submit-group(string /* orig */, string /* name */);
     callback toggle-theme();               // flip dark ↔ light
-    callback check-for-updates();          // 检查是否有新版本
-    in property <string> update-status: ""; // 更新检查结果
+    // Session sync / broadcast input (#78 pt.4): mirror keystrokes to every
+    // online session. Default off (it types into ALL sessions at once).
+    in-out property <bool> sync-input: false;
+    callback set-sync-input(bool);
+    // Mirror SFTP uploads to other sessions while sync-input is on (#sync).
+    in-out property <bool> sync-upload-enabled: false;
+    callback set-sync-upload-enabled(bool);
     in-out property <length> sftp-panel-height: 220px; // shared; lets Rust locate the drop zone
+    in-out property <length> sftp-panel-width: 380px;  // SFTP extent when docked left/right
+    in-out property <string> sftp-dock: "bottom";      // SFTP dock edge, shared across tabs
     callback pick-download-dir();            // open a folder picker
     callback open-download-dir();            // reveal the folder in the OS
     callback clear-transfers();              // wipe the transfer history
+    callback cancel-transfer(string);        // cancel an in-progress transfer by id (#100)
     callback set-language(string);           // switch UI language ("zh" / "en")
 
-    // --- Hotkey settings (快捷键) -------------------------------------------
-    in-out property <string> hotkey-new-tab: "t";       // Ctrl+T: 新标签页
-    in-out property <string> hotkey-close-tab: "w";     // Ctrl+W: 关闭标签
-    in-out property <string> hotkey-toggle-sidebar: "b"; // Ctrl+B: 切换侧边栏
-    in-out property <string> hotkey-new-session: "n";   // Ctrl+N: 新建会话
-    in-out property <string> hotkey-settings: ",";      // Ctrl+,: 打开设置
-    callback set-hotkey(string, string);     // (action, key) — 保存快捷键配置
-    in-out property <string> recording-hotkey: "";  // 正在录制的快捷键 action，空=未录制
+    // --- Rusterm-specific properties / callbacks ---------------------------
+    // Host key dialog
+    in-out property <bool> host-key-open: false;
+    in-out property <string> host-key-host: "";
+    in-out property <string> host-key-type: "";
+    in-out property <string> host-key-fingerprint: "";
+    in-out property <bool> host-key-changed: false;
+    callback host-key-accepted();
+    callback host-key-rejected();
+
+    // Terminal background / font colour customisation
+    property <string> term-sub-tab: "bg";  // 终端设置子标签: "bg" | "font"
+    in-out property <brush> term-bg-override <=> Theme.term-bg-override;
+    in-out property <image> term-bg-image-src <=> Theme.term-bg-image-src;
+    in-out property <float> term-bg-opacity <=> Theme.term-bg-opacity;
+    in property <[brush]> bg-color-presets;
+    in property <[brush]> fg-color-presets;
+    in-out property <string> term-bg-hex-input: "";
+    in-out property <string> term-fg-hex-input: "";
+    in-out property <brush> term-fg-override <=> Theme.term-fg-override;
+    callback set-term-bg-color(int);
+    callback set-term-bg-opacity(float);
+    callback pick-bg-image();
+    callback clear-bg-image();
+    callback set-term-bg-color-hex(string);
+    callback set-term-fg-color(int);
+    callback set-term-fg-color-hex(string);
+
+    // Hotkeys
+    in-out property <string> hotkey-new-tab: "t";
+    in-out property <string> hotkey-close-tab: "w";
+    in-out property <string> hotkey-toggle-sidebar: "b";
+    in-out property <string> hotkey-new-session: "n";
+    in-out property <string> hotkey-settings: ",";
+    callback set-hotkey(string, string);
+    in-out property <string> recording-hotkey: "";
+
+    // Update check extras
+    callback check-for-updates();
+    in property <string> update-status: "";
+
+    // WebDAV sync
+    in-out property <bool> show-webdav-dialog: false;
+    in-out property <string> webdav-url: "";
+    in-out property <string> webdav-username: "";
+    in-out property <string> webdav-password: "";
+    in-out property <bool> webdav-enabled: false;
+    in-out property <bool> webdav-auto-sync: false;
+    in-out property <bool> webdav-busy: false;
+    in property <string> webdav-status: "";
+    callback webdav-test-connection();
+    callback webdav-upload();
+    callback webdav-download();
+    callback webdav-save-settings(string, string, string, bool, bool);
+    callback webdav-open-dialog();
+
+    // Toast notification
+    in-out property <string> toast-text: "";
+    in-out property <bool> toast-visible: false;
+
+    // Active page in the rusterm Interface settings dialog
+    in-out property <string> ifd-page: "font";
 
     // --- Update check (#48) ------------------------------------------------
     // Set by Rust after a background GitHub-releases query; purely informational
@@ -265,7 +512,7 @@ export component AppWindow inherits Window {
     in-out property <string> dialog-name;
     in-out property <string> dialog-host;
     in-out property <string> dialog-port: "22";
-    in-out property <string> dialog-user: "root";
+    in-out property <string> dialog-user;
     in-out property <string> dialog-auth: "password";
     in-out property <string> dialog-password;
     in-out property <string> dialog-key-path;
@@ -282,6 +529,7 @@ export component AppWindow inherits Window {
 
     // Delete-confirmation modal state (#28).
     in-out property <bool> confirm-delete-open: false;
+    in-out property <bool> confirm-delete-batch: false;   // delete checked entries (#100)
     in-out property <string> confirm-delete-tab;
     in-out property <string> confirm-delete-path;
 
@@ -302,17 +550,16 @@ export component AppWindow inherits Window {
     callback session-dialog-pick-key();
     // Port forwards for the session being edited (#56).
     in-out property <[PortFwd]> dialog-forwards;
-    callback add-forward(string /* kind */, string /* bind */, int /* port */,
+    callback add-forward(string /* name */, string /* kind */, string /* bind */, int /* port */,
                          string /* host */, int /* host-port */);
     callback delete-forward(int /* index */);
 
     callback tab-selected(string);
     callback tab-closed(string);
     callback new-tab-clicked();
-    // 右键菜单回调
-    callback close-other-tabs(string);    // 关闭其他标签
-    callback close-right-tabs(string);    // 关闭右侧标签
-    callback close-all-tabs();            // 关闭所有标签
+    callback close-other-tabs(string /* keep-id */);
+    callback close-right-tabs(string /* from-id */);
+    callback close-all-tabs();
     // Asks Rust to recompute the sidebar (status + resources) for whatever tab
     // is now active.  Fired on every active-tab change, UI- or code-driven.
     callback refresh-sidebar();
@@ -335,6 +582,9 @@ export component AppWindow inherits Window {
     // Toggle expand/collapse of a tree node (also navigates to that directory).
     callback sftp-tree-expand(string /* tab-id */, string /* path */);
     callback sftp-delete(string /* tab-id */, string /* path */);
+    callback sftp-toggle-select(string /* tab-id */, int /* row */);   // (#100)
+    callback sftp-download-selected(string /* tab-id */);              // (#100)
+    callback sftp-delete-selected(string /* tab-id */);               // (#100)
     callback sftp-view(string /* tab-id */, string /* path */);
     callback sftp-edit(string /* tab-id */, string /* path */);
     callback sftp-open-external(string /* tab-id */, string /* path */);
@@ -372,61 +622,91 @@ export component AppWindow inherits Window {
     callback find-query-changed(string /* tab-id */, string /* query */);
     // Scroll a session's scrollback history by N lines (+ = up/older).
     callback terminal-scroll(string /* tab-id */, int /* delta-lines */);
+    callback terminal-scroll-to(string /* tab-id */, int /* offset */); // scrollbar drag (#103)
     // Drag-selection lifecycle (grid row/col coordinates).
     callback term-select-start(string /* tab-id */, int /* row */, int /* col */);
     callback term-select-update(string /* tab-id */, int /* row */, int /* col */);
     callback term-select-end(string /* tab-id */);
     callback term-select-autoscroll(string /* tab-id */, int /* dir */);
 
-    // WebDAV sync
-    in-out property <bool> show-webdav-dialog: false;
-    in-out property <string> webdav-url: "";
-    in-out property <string> webdav-username: "";
-    in-out property <string> webdav-password: "";
-    in-out property <bool> webdav-enabled: false;
-    in-out property <bool> webdav-auto-sync: false;
-    in-out property <string> webdav-status: "";
-    in-out property <bool> webdav-busy: false;
-    callback webdav-test-connection();
-    callback webdav-upload();
-    callback webdav-download();
-    callback webdav-save-settings(string, string, string, bool, bool);
-    callback webdav-open-dialog();
+    VerticalLayout {
+        spacing: 0;
 
-    // 全局快捷键处理（从配置读取）
-    FocusScope {
-        key-pressed(e) => {
-            if e.modifiers.control && e.text == root.hotkey-new-tab {
-                root.new-tab-clicked();
-                accept
+        // Immersive custom title bar (#119) — only on frameless platforms
+        // (Windows/Linux). App icon + name on the left, a draggable middle
+        // (move window / double-click to maximize), then the toolbar icons and
+        // window controls on the right. macOS keeps its native title bar and
+        // shows the toolbar icons via the overlay further below.
+        if root.custom-titlebar : Rectangle {
+            height: 38px;
+            background: Theme.bg-panel;
+            tb-drag := TouchArea {
+                pointer-event(e) => {
+                    if (e.kind == PointerEventKind.down && e.button == PointerEventButton.left) {
+                        root.win-drag();
+                    }
+                }
+                double-clicked => { root.win-maximize-toggle(); }
             }
-            if e.modifiers.control && e.text == root.hotkey-close-tab {
-                root.tab-closed(root.active-tab-id);
-                accept
+            HorizontalLayout {
+                padding-left: 12px;
+                spacing: 8px;
+                // Vertical-centering wrappers so the icon and name line up (#119).
+                VerticalLayout {
+                    alignment: center;
+                    Image {
+                        source: @image-url("../assets/icon.png");
+                        width: 18px;
+                        height: 18px;
+                    }
+                }
+                VerticalLayout {
+                    alignment: center;
+                    Text {
+                        text: "rusterm";
+                        color: Theme.text-secondary;
+                        font-size: Theme.fs-sm;
+                    }
+                }
+                // Draggable spacer (no TouchArea → clicks fall to tb-drag).
+                Rectangle { horizontal-stretch: 1; }
+                // Window controls only — the app toolbar icons live in the tab
+                // row below, not here (#119).
+                WinBtn { icon: "\u{E15B}"; clicked => { root.win-minimize(); } }
+                WinBtn {
+                    icon: root.window-maximized ? "\u{E3E0}" : "\u{E835}";
+                    clicked => { root.win-maximize-toggle(); }
+                }
+                WinBtn { icon: "\u{E5CD}"; danger: true; clicked => { root.win-close(); } }
             }
-            if e.modifiers.control && e.text == root.hotkey-toggle-sidebar {
-                root.sidebar-collapsed = !root.sidebar-collapsed;
-                accept
-            }
-            if e.modifiers.control && e.text == root.hotkey-new-session {
-                root.new-session-clicked();
-                accept
-            }
-            if e.modifiers.control && e.text == root.hotkey-settings {
-                root.settings-open = !root.settings-open;
-                accept
-            }
-            reject
         }
 
-        HorizontalLayout {
-            spacing: 0;
+        // Dock area — fills below the title bar. The resource sidebar and the
+        // central content are positioned by absolute geometry computed from
+        // `sidebar-dock`, so the sidebar can sit on any window edge (#dock).
+        dock-area := Rectangle {
+        vertical-stretch: 1;
+        // Sidebar extent along its docked axis (0 when collapsed); plus a 4px
+        // splitter unless collapsed.
+        property <length> sb-w: root.sidebar-collapsed ? 0px : root.sidebar-width;
+        property <length> sb-h: root.sidebar-collapsed ? 0px : root.sidebar-height;
+        property <length> sp: root.sidebar-collapsed ? 0px : 4px;
 
-            // Left sidebar — collapsible (width animates to 0).
+        // Left sidebar — collapsible and drag-resizable, dockable to any edge.
+        // The animation is disabled while dragging so the splitter tracks the
+        // cursor 1:1 instead of lagging behind.
         Sidebar {
-            width: root.sidebar-collapsed ? 0px : 220px;
+            x: root.sidebar-dock == "right" ? parent.width - parent.sb-w
+             : 0px;
+            y: root.sidebar-dock == "bottom" ? parent.height - parent.sb-h
+             : 0px;
+            width: root.sidebar-horizontal ? parent.sb-w : parent.width;
+            height: root.sidebar-horizontal ? parent.height : parent.sb-h;
             clip: true;
-            animate width { duration: 150ms; easing: ease-out; }
+            // Docked top/bottom → lay the resource widgets out in a row.
+            lay-horizontal: !root.sidebar-horizontal;
+            dock-edge: root.sidebar-dock;
+            animate width, height { duration: root.sidebar-dragging ? 0ms : 150ms; easing: ease-out; }
             connection-state: root.connection-state;
             host-ip: root.host-ip;
             conn-state: root.conn-state;
@@ -448,36 +728,95 @@ export component AppWindow inherits Window {
             disks: root.disks;
             proc-available: root.proc-available;
             app-version: root.app-version;
-            select-net-iface(i) => { root.select-net-iface(i); }
-            show-processes() => { root.proc-open = true; }
             copy-text(t) => { root.copy-text(t); }
+            select-net-iface(i) => { root.select-net-iface(i); }
+            show-processes() => { root.open-processes(); }
+            // Drag the sidebar header to dock it to another edge. Coordinates
+            // arrive in window space; convert to dock-area-relative fractions.
+            dock-drag-move(ax, ay) => {
+                root.panel-dragging = true;
+                root.drag-nx = (ax - dock-area.absolute-position.x) / dock-area.width;
+                root.drag-ny = (ay - dock-area.absolute-position.y) / dock-area.height;
+            }
+            dock-drag-end() => {
+                if (root.dock-target != "") {
+                    root.sidebar-dock = root.dock-target;
+                    root.persist-sidebar-dock(root.sidebar-dock);
+                }
+                root.panel-dragging = false;
+            }
+            toggle-collapse() => { root.sidebar-collapsed = !root.sidebar-collapsed; }
         }
 
-        // Right side: tabs + content
-        VerticalLayout {
+        // Splitter — drag to resize the sidebar. Orientation + which dimension it
+        // adjusts follow the dock edge. Hidden while collapsed.
+        Rectangle {
+            visible: !root.sidebar-collapsed;
+            // Horizontal docks → a vertical 4px bar at the sidebar's inner edge;
+            // vertical docks → a horizontal 4px bar.
+            x: root.sidebar-dock == "left"   ? parent.sb-w
+             : root.sidebar-dock == "right"  ? parent.width - parent.sb-w - 4px
+             : 0px;
+            y: root.sidebar-dock == "top"    ? parent.sb-h
+             : root.sidebar-dock == "bottom" ? parent.height - parent.sb-h - 4px
+             : 0px;
+            width:  root.sidebar-horizontal ? 4px : parent.width;
+            height: root.sidebar-horizontal ? parent.height : 4px;
+            background: sb-split-ta.has-hover || root.sidebar-dragging
+                ? Theme.accent
+                : Theme.border-subtle;
+            sb-split-ta := TouchArea {
+                mouse-cursor: root.sidebar-horizontal ? ew-resize : ns-resize;
+                pointer-event(ev) => {
+                    if (ev.kind == PointerEventKind.down) {
+                        root.sidebar-dragging = true;
+                        root.sidebar-drag-start-x = self.mouse-x;
+                        root.sidebar-drag-start-y = self.mouse-y;
+                    } else if (ev.kind == PointerEventKind.up) {
+                        root.sidebar-dragging = false;
+                        root.persist-sidebar-width(root.sidebar-width / 1px);
+                    }
+                }
+                moved => {
+                    if (root.sidebar-dragging) {
+                        if (root.sidebar-horizontal) {
+                            // left grows with +dx, right grows with -dx.
+                            root.sidebar-width = clamp(
+                                root.sidebar-width
+                                    + (root.sidebar-dock == "right" ? -1 : 1)
+                                      * (self.mouse-x - root.sidebar-drag-start-x),
+                                160px, 520px);
+                        } else {
+                            // top grows with +dy, bottom grows with -dy.
+                            root.sidebar-height = clamp(
+                                root.sidebar-height
+                                    + (root.sidebar-dock == "bottom" ? -1 : 1)
+                                      * (self.mouse-y - root.sidebar-drag-start-y),
+                                120px, 480px);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Right side: tabs + content — positioned in the rect left after the
+        // sidebar is carved off its docked edge. Clipped so the terminal / SFTP
+        // panel can never bleed (visually or for clicks) onto a panel docked on
+        // the bottom or right (#dock).
+        central := Rectangle {
+            x: root.sidebar-dock == "left" ? parent.sb-w + parent.sp : 0px;
+            y: root.sidebar-dock == "top"  ? parent.sb-h + parent.sp : 0px;
+            width:  root.sidebar-horizontal ? parent.width - parent.sb-w - parent.sp : parent.width;
+            height: root.sidebar-horizontal ? parent.height : parent.height - parent.sb-h - parent.sp;
+            clip: true;
+            VerticalLayout {
             spacing: 0;
-            horizontal-stretch: 1;
 
             HorizontalLayout {
                 spacing: 0;
-                // Sidebar collapse / expand toggle.
-                Rectangle {
-                    width: 30px;
-                    background: sb-ta.has-hover ? Theme.bg-hover : Theme.bg-panel;
-                    sb-ta := TouchArea {
-                        mouse-cursor: pointer;
-                        clicked => { root.sidebar-collapsed = !root.sidebar-collapsed; }
-                    }
-                    Text {
-                        // chevron_right (show panel) when collapsed, else chevron_left
-                        text: root.sidebar-collapsed ? "\u{E5CC}" : "\u{E5CB}";
-                        font-family: "Material Icons";
-                        color: Theme.text-secondary;
-                        font-size: Theme.fs-md;
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
-                    }
-                }
+                // The sidebar collapse toggle now lives inside the panel header
+                // (so it follows the panel to any edge); expand-when-collapsed is
+                // a floating button at the docked edge below (#dock).
                 TabBar {
                     horizontal-stretch: 1;
                     tabs: root.tabs;
@@ -487,12 +826,10 @@ export component AppWindow inherits Window {
                         root.tab-selected(id);
                     }
                     tab-closed(id) => { root.tab-closed(id); }
-                    new-tab() => { root.new-tab-clicked(); }
-                    // 右键菜单回调
-                    close-tab(id) => { root.tab-closed(id); }
                     close-other-tabs(id) => { root.close-other-tabs(id); }
                     close-right-tabs(id) => { root.close-right-tabs(id); }
                     close-all-tabs() => { root.close-all-tabs(); }
+                    new-tab() => { root.new-tab-clicked(); }
                 }
             }
 
@@ -501,8 +838,11 @@ export component AppWindow inherits Window {
                 vertical-stretch: 1;
                 background: Theme.bg-root;
 
-                // Welcome tab
+                // Welcome tab — fill the content area explicitly (some renderers
+                // don't auto-fill, which spread the header/card apart) (#dock).
                 if root.active-tab-id == "welcome" : Welcome {
+                    width: parent.width;
+                    height: parent.height;
                     sessions: root.sessions;
                     import-hint: root.ssh-import-hint;
                     new-session => { root.new-session-clicked(); }
@@ -540,10 +880,14 @@ export component AppWindow inherits Window {
                     cursor-row: term.cursor-row;
                     cursor-col: term.cursor-col;
                     rows-used: term.rows-used;
+                    scroll-max: term.scroll-max;
+                    scroll-offset: term.scroll-offset;
                     is-alt-screen: term.is-alt-screen;
                     find-matches: term.find-matches;
                     selection: term.selection;
                     sftp-panel-height <=> root.sftp-panel-height;
+                    sftp-panel-width <=> root.sftp-panel-width;
+                    sftp-dock <=> root.sftp-dock;
                     sftp-collapsed <=> root.sftp-collapsed;
                     sftp-saved-height <=> root.sftp-saved-height;
                     sftp-path: term.sftp-path;
@@ -551,16 +895,30 @@ export component AppWindow inherits Window {
                     sftp-status: term.sftp-status;
                     sftp-loading: term.sftp-loading;
                     sftp-tree-nodes: term.sftp-tree-nodes;
+                    sftp-selected-count: term.sftp-selected-count;
                     quick-commands: root.quick-commands;
                     command-history: root.command-history;
+                    history-view: root.history-view;
                     run-command(cmd, all) => { root.run-command(term.id, cmd, all); }
                     copy-text(t) => { root.copy-text(t); }
                     delete-history(i) => { root.delete-history(i); }
+                    delete-history-cmd(c) => { root.delete-history-cmd(c); }
+                    search-history(q) => { root.search-history(q); }
                     manage-quick-commands() => {
                         root.qcm-name = "";
                         root.qcm-command = "";
+                        root.qcm-group = "";
+                        root.qcm-edit-index = -1;
                         root.quick-cmd-manage-open = true;
                     }
+                    toggle-quick-group(g) => { root.toggle-quick-group(g); }
+                    edit-quick-command(i) => { root.edit-quick-command(i); }
+                    duplicate-quick-command(i) => { root.duplicate-quick-command(i); }
+                    delete-quick-command(i) => { root.delete-quick-command(i); }
+                    move-quick-command(i, g) => { root.move-quick-command(i, g); }
+                    new-quick-group() => { root.qcg-orig = ""; root.qcg-name = ""; root.qcg-open = true; }
+                    rename-quick-group(g) => { root.qcg-orig = g; root.qcg-name = g; root.qcg-open = true; }
+                    delete-quick-group(g) => { root.delete-quick-group(g); }
                     send-key(key, ctrl, alt, shift) => { root.send-key(term.id, key, ctrl, alt, shift) }
                     terminal-resize(w, h) => { root.terminal-resize(term.id, w, h) }
                     sftp-navigate(path) => { root.sftp-navigate(term.id, path); }
@@ -568,6 +926,16 @@ export component AppWindow inherits Window {
                     sftp-upload-clicked(dir, folder) => { root.sftp-upload-clicked(term.id, dir, folder); }
                     sftp-refresh(path) => { root.sftp-refresh(term.id, path); }
                     sftp-tree-expand(path) => { root.sftp-tree-expand(term.id, path); }
+                    sftp-toggle-select(i) => { root.sftp-toggle-select(term.id, i); }
+                    sftp-download-selected() => { root.sftp-download-selected(term.id); }
+                    // Confirm before deleting the checked entries (#100), reusing
+                    // the delete-confirm dialog in batch mode.
+                    sftp-delete-selected() => {
+                        root.confirm-delete-tab = term.id;
+                        root.confirm-delete-batch = true;
+                        root.confirm-delete-path = root.lang-en ? "the selected items" : "选中的项目";
+                        root.confirm-delete-open = true;
+                    }
                     // Gate delete behind an in-app confirmation (#28): stash the
                     // target and open the modal; the real delete fires on confirm.
                     sftp-delete(path) => {
@@ -610,110 +978,172 @@ export component AppWindow inherits Window {
                     clear-terminal() => { root.clear-terminal(term.id); }
                     find-query-changed(q) => { root.find-query-changed(term.id, q); }
                     terminal-scroll(d) => { root.terminal-scroll(term.id, d); }
+                    terminal-scroll-to(o) => { root.terminal-scroll-to(term.id, o); }
                     select-start(r, c) => { root.term-select-start(term.id, r, c); }
                     select-update(r, c) => { root.term-select-update(term.id, r, c); }
                     select-end() => { root.term-select-end(term.id); }
                     select-autoscroll(dir) => { root.term-select-autoscroll(term.id, dir); }
                 }
             }
+            }
         }
-    }  // end HorizontalLayout
 
-    }  // end FocusScope (global shortcuts)
+        // Expand button — shown only while the panel is collapsed, anchored to
+        // the edge it's docked on so it's always reachable to bring it back.
+        if root.sidebar-collapsed : Rectangle {
+            width: 24px; height: 24px;
+            x: root.sidebar-dock == "right"  ? parent.width - self.width - 2px
+             : root.sidebar-dock == "top" || root.sidebar-dock == "bottom" ? 6px
+             : 2px;
+            // Left/right docks: centre vertically so it doesn't collide with the
+            // top-right toolbar icons (settings/theme/…); top/bottom: at the edge.
+            y: root.sidebar-dock == "bottom" ? parent.height - self.height - 2px
+             : root.sidebar-dock == "top"    ? 2px
+             : (parent.height - self.height) / 2;
+            border-radius: Theme.radius-sm;
+            background: exp-ta.has-hover ? Theme.bg-hover : Theme.bg-elevated;
+            border-width: 1px;
+            border-color: Theme.border-subtle;
+            exp-ta := TouchArea {
+                mouse-cursor: pointer;
+                clicked => { root.sidebar-collapsed = false; }
+            }
+            Text {
+                text: root.sidebar-dock == "right"  ? "\u{E5CB}"   // chevron_left
+                    : root.sidebar-dock == "top"    ? "\u{E5CF}"   // expand_more
+                    : root.sidebar-dock == "bottom" ? "\u{E5CE}"   // expand_less
+                    : "\u{E5CC}";                                  // chevron_right
+                font-family: "Material Icons"; font-size: 16px; color: Theme.text-secondary;
+                horizontal-alignment: center; vertical-alignment: center;
+            }
+        }
 
-    // --- Top-right buttons: [☀/🌙 theme] [↓ download] [⚙ settings] ----------
-    // Settings (gear) — far right.
-    Rectangle {
-        x: root.width - 34px;
-        y: 8px;
-        width: 26px;
-        height: 26px;
-        border-radius: Theme.radius-sm;
-        background: gear-ta.has-hover || root.settings-open ? Theme.bg-hover : transparent;
-        gear-ta := TouchArea {
-            mouse-cursor: pointer;
-            clicked => {
-                root.settings-open = !root.settings-open;
-                root.download-open = false;
+        // Drag-to-dock snap overlay — four edge zones; the one under the cursor
+        // (root.dock-target) lights up. Purely visual (no TouchArea) so the
+        // header's drag keeps receiving move events (#dock).
+        if root.panel-dragging : Rectangle {
+            x: 0; y: 0;
+            width: parent.width;
+            height: parent.height;
+            Rectangle {   // left zone
+                x: 0; y: 0; width: parent.width * 0.22; height: parent.height;
+                background: root.dock-target == "left"
+                    ? Theme.accent.with-alpha(0.35) : Theme.accent.with-alpha(0.10);
+                border-width: root.dock-target == "left" ? 2px : 0px;
+                border-color: Theme.accent;
+            }
+            Rectangle {   // right zone
+                x: parent.width * 0.78; y: 0; width: parent.width * 0.22; height: parent.height;
+                background: root.dock-target == "right"
+                    ? Theme.accent.with-alpha(0.35) : Theme.accent.with-alpha(0.10);
+                border-width: root.dock-target == "right" ? 2px : 0px;
+                border-color: Theme.accent;
+            }
+            Rectangle {   // top zone
+                x: 0; y: 0; width: parent.width; height: parent.height * 0.22;
+                background: root.dock-target == "top"
+                    ? Theme.accent.with-alpha(0.35) : Theme.accent.with-alpha(0.10);
+                border-width: root.dock-target == "top" ? 2px : 0px;
+                border-color: Theme.accent;
+            }
+            Rectangle {   // bottom zone
+                x: 0; y: parent.height * 0.78; width: parent.width; height: parent.height * 0.22;
+                background: root.dock-target == "bottom"
+                    ? Theme.accent.with-alpha(0.35) : Theme.accent.with-alpha(0.10);
+                border-width: root.dock-target == "bottom" ? 2px : 0px;
+                border-color: Theme.accent;
             }
         }
-        Text {
-            text: "\u{E8B8}";              // Material Icons settings (gear)
-            font-family: "Material Icons";
-            color: Theme.text-secondary;
-            font-size: Theme.fs-md;
-            horizontal-alignment: center;
-            vertical-alignment: center;
-        }
     }
-    // Download manager — left of settings.
-    Rectangle {
-        x: root.width - 64px;
-        y: 8px;
-        width: 26px;
-        height: 26px;
-        border-radius: Theme.radius-sm;
-        background: dl-ta.has-hover || root.download-open ? Theme.bg-hover : transparent;
-        dl-ta := TouchArea {
-            mouse-cursor: pointer;
-            clicked => {
-                root.download-open = !root.download-open;
-                root.settings-open = false;
-            }
-        }
-        Text {
-            text: "\u{E2C4}";              // Material Icons file_download
-            font-family: "Material Icons";
-            color: Theme.text-secondary;
-            font-size: Theme.fs-md;
-            horizontal-alignment: center;
-            vertical-alignment: center;
-        }
     }
-    // WebDAV sync — left of download.
-    Rectangle {
-        x: root.width - 94px;
-        y: 8px;
-        width: 26px;
-        height: 26px;
-        border-radius: Theme.radius-sm;
-        background: webdav-btn-ta.has-hover || root.show-webdav-dialog ? Theme.bg-hover : transparent;
-        webdav-btn-ta := TouchArea {
-            mouse-cursor: pointer;
-            clicked => {
-                webdav-open-dialog();
-            }
-        }
-        Text {
-            text: "☁";
-            color: Theme.text-secondary;
-            font-size: Theme.fs-md;
-            horizontal-alignment: center;
-            vertical-alignment: center;
-        }
+
+    // App toolbar icons (settings/download/theme/sync). They sit at the top-right
+    // of the tab row — below the custom title bar when frameless (y offset), or
+    // at the very top on macOS where the native title bar is separate (#119).
+    IconBtn {
+        x: root.width - 34px - root.toolbar-x-off; y: (root.custom-titlebar ? 46px : 8px) + root.toolbar-y-off;
+        icon: "\u{E8B8}";
+        tooltip: root.lang-en ? "Settings" : "设置";
+        active: root.settings-open;
+        clicked => { root.settings-open = !root.settings-open; root.download-open = false; root.ssh-import-hint = ""; }
     }
-    // Theme toggle (sun = currently dark → click for light;
-    //               moon = currently light → click for dark) — left of download.
-    Rectangle {
-        x: root.width - 124px;
-        y: 8px;
-        width: 26px;
-        height: 26px;
-        border-radius: Theme.radius-sm;
-        background: theme-ta.has-hover ? Theme.bg-hover : transparent;
-        theme-ta := TouchArea {
-            mouse-cursor: pointer;
-            clicked => { root.toggle-theme(); }
+    IconBtn {
+        x: root.width - 64px - root.toolbar-x-off; y: (root.custom-titlebar ? 46px : 8px) + root.toolbar-y-off;
+        icon: "\u{E2C4}";
+        tooltip: root.lang-en ? "Download" : "下载";
+        active: root.download-open;
+        clicked => { root.download-open = !root.download-open; root.settings-open = false; }
+    }
+    IconBtn {
+        x: root.width - 94px - root.toolbar-x-off; y: (root.custom-titlebar ? 46px : 8px) + root.toolbar-y-off;
+        icon: Theme.dark ? "\u{E518}" : "\u{E51C}";
+        icon-color: Theme.dark ? #f5c542 : #5856d6;
+        tooltip: root.lang-en ? "Toggle theme" : "切换主题";
+        clicked => { root.toggle-theme(); }
+    }
+    IconBtn {
+        x: root.width - 154px - root.toolbar-x-off; y: (root.custom-titlebar ? 46px : 8px) + root.toolbar-y-off;
+        icon: "\u{E2BD}";
+        tooltip: root.lang-en ? "WebDAV sync" : "WebDAV 同步";
+        icon-color: root.webdav-enabled ? Theme.accent : Theme.text-secondary;
+        active: root.show-webdav-dialog;
+        clicked => { root.webdav-open-dialog(); }
+    }
+    IconBtn {
+        x: root.width - 124px - root.toolbar-x-off; y: (root.custom-titlebar ? 46px : 8px) + root.toolbar-y-off;
+        icon: "\u{E627}";
+        icon-color: root.sync-input ? Theme.accent : Theme.text-secondary;
+        active: root.sync-input;
+        tooltip: root.lang-en
+            ? (root.sync-input ? "Sync input: ON" : "Sync input")
+            : (root.sync-input ? "会话同步：开" : "会话同步");
+        clicked => { root.sync-input = !root.sync-input; root.set-sync-input(root.sync-input); }
+    }
+
+    // Frameless resize edges (#119): thin hit-zones that start an OS-level
+    // resize via winit. Hidden when maximized.
+    if root.custom-titlebar && !root.window-maximized : Rectangle {
+        width: 100%;
+        height: 100%;
+        TouchArea {  // top
+            x: 8px; y: 0; width: parent.width - 16px; height: 5px;
+            mouse-cursor: ns-resize;
+            pointer-event(e) => { if (e.kind == PointerEventKind.down && e.button == PointerEventButton.left) { root.win-resize(0); } }
         }
-        Text {
-            // light_mode ☀ when dark (click → go light)
-            // dark_mode  🌙 when light (click → go dark)
-            text: Theme.dark ? "\u{E518}" : "\u{E51C}";
-            font-family: "Material Icons";
-            color: Theme.dark ? #f5c542 : #5856d6;  // amber sun / indigo moon
-            font-size: Theme.fs-md;
-            horizontal-alignment: center;
-            vertical-alignment: center;
+        TouchArea {  // bottom
+            x: 8px; y: parent.height - 5px; width: parent.width - 16px; height: 5px;
+            mouse-cursor: ns-resize;
+            pointer-event(e) => { if (e.kind == PointerEventKind.down && e.button == PointerEventButton.left) { root.win-resize(1); } }
+        }
+        TouchArea {  // left
+            x: 0; y: 8px; width: 5px; height: parent.height - 16px;
+            mouse-cursor: ew-resize;
+            pointer-event(e) => { if (e.kind == PointerEventKind.down && e.button == PointerEventButton.left) { root.win-resize(3); } }
+        }
+        TouchArea {  // right
+            x: parent.width - 5px; y: 8px; width: 5px; height: parent.height - 16px;
+            mouse-cursor: ew-resize;
+            pointer-event(e) => { if (e.kind == PointerEventKind.down && e.button == PointerEventButton.left) { root.win-resize(2); } }
+        }
+        TouchArea {  // top-left
+            x: 0; y: 0; width: 8px; height: 8px;
+            mouse-cursor: nwse-resize;
+            pointer-event(e) => { if (e.kind == PointerEventKind.down && e.button == PointerEventButton.left) { root.win-resize(5); } }
+        }
+        TouchArea {  // top-right
+            x: parent.width - 8px; y: 0; width: 8px; height: 8px;
+            mouse-cursor: nesw-resize;
+            pointer-event(e) => { if (e.kind == PointerEventKind.down && e.button == PointerEventButton.left) { root.win-resize(4); } }
+        }
+        TouchArea {  // bottom-left
+            x: 0; y: parent.height - 8px; width: 8px; height: 8px;
+            mouse-cursor: nesw-resize;
+            pointer-event(e) => { if (e.kind == PointerEventKind.down && e.button == PointerEventButton.left) { root.win-resize(7); } }
+        }
+        TouchArea {  // bottom-right
+            x: parent.width - 8px; y: parent.height - 8px; width: 8px; height: 8px;
+            mouse-cursor: nwse-resize;
+            pointer-event(e) => { if (e.kind == PointerEventKind.down && e.button == PointerEventButton.left) { root.win-resize(6); } }
         }
     }
 
@@ -865,7 +1295,7 @@ export component AppWindow inherits Window {
                                        horizontal-alignment: center; vertical-alignment: center; }
                             }
                             Rectangle {
-                                width: 22px; height: 22px;
+                                width: 28px; height: 28px;
                                 border-radius: Theme.radius-sm;
                                 background: ed-close-ta.has-hover ? Theme.bg-hover : transparent;
                                 ed-close-ta := TouchArea {
@@ -981,7 +1411,7 @@ export component AppWindow inherits Window {
     // elements mid-event, which crashes when created/removed at the Window root).
     Rectangle {
         x: parent.width - 364px;
-        y: 40px;
+        y: root.custom-titlebar ? 78px : 40px;
         width: 350px;
         height: 400px;
         visible: root.download-open;
@@ -1138,6 +1568,25 @@ export component AppWindow inherits Window {
                                         font-size: Theme.fs-xs;
                                         vertical-alignment: center;
                                     }
+                                    // Cancel button — only while the transfer is
+                                    // active (0) or preparing (3) (#100).
+                                    if t.state == 0 || t.state == 3 : Rectangle {
+                                        width: 16px; height: 16px;
+                                        border-radius: Theme.radius-sm;
+                                        background: cancel-ta.has-hover ? Theme.danger.with-alpha(0.18) : transparent;
+                                        cancel-ta := TouchArea {
+                                            mouse-cursor: pointer;
+                                            clicked => { root.cancel-transfer(t.id); }
+                                        }
+                                        Text {
+                                            text: "\u{E5CD}"; // close
+                                            font-family: "Material Icons";
+                                            color: cancel-ta.has-hover ? Theme.danger : Theme.text-muted;
+                                            font-size: Theme.fs-sm;
+                                            horizontal-alignment: center;
+                                            vertical-alignment: center;
+                                        }
+                                    }
                                 }
                                 // progress bar
                                 Rectangle {
@@ -1160,119 +1609,8 @@ export component AppWindow inherits Window {
             }
         }
 
-    // --- Process monitor popup (#23) --------------------------------------
-    // Read-only table of the remote machine's top processes by CPU. The data
-    // refreshes live every ~2s via the monitor channel while the popup is open.
-    if root.proc-open : TouchArea {
-        width: parent.width;
-        height: parent.height;
-        clicked => { root.proc-open = false; }
-    }
-    if root.proc-open : Rectangle {
-        x: (parent.width - 580px) / 2;
-        y: 56px;
-        width: 580px;
-        height: 440px;
-        background: Theme.bg-panel;
-        border-radius: Theme.radius-md;
-        border-width: 1px;
-        border-color: Theme.border-strong;
-        drop-shadow-blur: 16px;
-        drop-shadow-color: #00000070;
-
-        // Swallow clicks so they don't reach the backdrop / terminal beneath.
-        TouchArea {}
-
-        VerticalLayout {
-            padding: 14px;
-            spacing: 10px;
-
-            HorizontalLayout {
-                Text {
-                    text: @tr("Processes");
-                    color: Theme.text-primary;
-                    font-size: Theme.fs-md;
-                    font-weight: 600;
-                    horizontal-stretch: 1;
-                    vertical-alignment: center;
-                }
-                Rectangle {
-                    width: 20px; height: 20px;
-                    border-radius: Theme.radius-sm;
-                    background: proc-close-ta.has-hover ? Theme.bg-hover : transparent;
-                    proc-close-ta := TouchArea {
-                        mouse-cursor: pointer;
-                        clicked => { root.proc-open = false; }
-                    }
-                    Text { text: "\u{E5CD}"; font-family: "Material Icons";
-                           color: Theme.text-secondary; font-size: Theme.fs-sm;
-                           horizontal-alignment: center; vertical-alignment: center; }
-                }
-            }
-
-            // Column header.
-            HorizontalLayout {
-                padding-left: 6px;
-                padding-right: 6px;
-                spacing: 4px;
-                Text { text: "PID"; width: 52px; color: Theme.text-muted; font-size: Theme.fs-xs; }
-                Text { text: @tr("User"); width: 80px; color: Theme.text-muted; font-size: Theme.fs-xs; }
-                Text { text: "CPU%"; width: 48px; color: Theme.text-muted; font-size: Theme.fs-xs;
-                       horizontal-alignment: right; }
-                Text { text: "MEM%"; width: 48px; color: Theme.text-muted; font-size: Theme.fs-xs;
-                       horizontal-alignment: right; }
-                Text { text: @tr("Command"); horizontal-stretch: 1; color: Theme.text-muted; font-size: Theme.fs-xs; }
-            }
-
-            Flickable {
-                vertical-stretch: 1;
-                viewport-width: self.width;
-                viewport-height: max(self.height, proc-col.preferred-height);
-                proc-col := VerticalLayout {
-                    alignment: start;
-                    spacing: 1px;
-
-                    if root.proc-list.length == 0 : Text {
-                        text: @tr("No processes");
-                        color: Theme.text-muted;
-                        font-size: Theme.fs-xs;
-                    }
-
-                    for p in root.proc-list : Rectangle {
-                        height: 20px;
-                        border-radius: 2px;
-                        clip: true;
-
-                        // CPU load bar behind the row.
-                        Rectangle {
-                            x: 0; y: 0;
-                            height: parent.height;
-                            width: parent.width * clamp(p.cpu-frac, 0.0, 1.0);
-                            background: p.cpu-frac > 0.5 ? Theme.warning.with-alpha(0.28)
-                                      : Theme.accent.with-alpha(0.20);
-                        }
-                        HorizontalLayout {
-                            padding-left: 6px;
-                            padding-right: 6px;
-                            spacing: 4px;
-                            Text { text: p.pid; width: 52px; color: Theme.text-secondary;
-                                   font-size: Theme.fs-xs; vertical-alignment: center; }
-                            Text { text: p.user; width: 80px; color: Theme.text-secondary;
-                                   font-size: Theme.fs-xs; vertical-alignment: center; overflow: elide; }
-                            Text { text: p.cpu; width: 48px; color: Theme.text-primary;
-                                   font-size: Theme.fs-xs; vertical-alignment: center;
-                                   horizontal-alignment: right; }
-                            Text { text: p.mem; width: 48px; color: Theme.text-secondary;
-                                   font-size: Theme.fs-xs; vertical-alignment: center;
-                                   horizontal-alignment: right; }
-                            Text { text: p.command; horizontal-stretch: 1; color: Theme.text-muted;
-                                   font-size: Theme.fs-xs; vertical-alignment: center; overflow: elide; }
-                        }
-                    }
-                }
-            }
-        }
-    }
+    // Process monitor is now ProcWindow (a detachable top-level window); the
+    // former in-app overlay was removed in favour of a real OS window (#23).
 
     // --- Settings menu popup (top-right) ----------------------------------
     // Click-outside-to-close backdrop (same pattern as the download popup).
@@ -1283,9 +1621,9 @@ export component AppWindow inherits Window {
     }
     Rectangle {
         x: parent.width - 196px;
-        y: 40px;
+        y: root.custom-titlebar ? 78px : 40px;
         width: 198px;
-        height: 191px;
+        height: 220px;
         visible: root.settings-open;
         background: Theme.bg-panel;
         border-radius: Theme.radius-md;
@@ -1365,25 +1703,34 @@ export component AppWindow inherits Window {
                            vertical-alignment: center; horizontal-stretch: 1; }
                 }
             }
-            // Import hosts from ~/.ssh/config.
+            // Import hosts from ~/.ssh/config. Keep the menu open so the result
+            // (e.g. "imported 3" / "no new hosts") is visible right here — it used
+            // to only show on the welcome page, so importing while a session was
+            // open looked like nothing happened (#133).
             Rectangle {
-                height: 28px;
+                height: root.ssh-import-hint != "" ? 46px : 28px;
                 border-radius: Theme.radius-sm;
                 background: import-ta.has-hover ? Theme.bg-hover : transparent;
                 import-ta := TouchArea {
                     mouse-cursor: pointer;
-                    clicked => {
-                        root.settings-open = false;
-                        root.import-ssh-config();
-                    }
+                    clicked => { root.import-ssh-config(); }
                 }
                 HorizontalLayout {
-                    padding-left: 8px; spacing: 8px;
+                    padding-left: 8px; padding-right: 8px; spacing: 8px;
                     Text { text: "\u{E890}"; font-family: "Material Icons"; // input/import
                            color: Theme.text-secondary; font-size: Theme.fs-sm;
                            vertical-alignment: center; }
-                    Text { text: @tr("Import ~/.ssh/config"); color: Theme.text-primary; font-size: Theme.fs-md;
-                           vertical-alignment: center; horizontal-stretch: 1; }
+                    VerticalLayout {
+                        horizontal-stretch: 1;
+                        alignment: center;
+                        Text { text: @tr("Import ~/.ssh/config"); color: Theme.text-primary; font-size: Theme.fs-md;
+                               vertical-alignment: center; }
+                        if root.ssh-import-hint != "" : Text {
+                            text: root.ssh-import-hint;
+                            color: Theme.text-muted; font-size: Theme.fs-xs;
+                            overflow: elide;
+                        }
+                    }
                 }
             }
             // Language toggle: shows the language you'll switch TO.
@@ -1404,6 +1751,28 @@ export component AppWindow inherits Window {
                            color: Theme.text-secondary; font-size: Theme.fs-sm;
                            vertical-alignment: center; }
                     Text { text: root.lang-en ? "切换到中文" : "Switch to English";
+                           color: Theme.text-primary; font-size: Theme.fs-md;
+                           vertical-alignment: center; horizontal-stretch: 1; }
+                }
+            }
+            // Keyboard shortcuts reference (#103).
+            Rectangle {
+                height: 28px;
+                border-radius: Theme.radius-sm;
+                background: keys-ta.has-hover ? Theme.bg-hover : transparent;
+                keys-ta := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => {
+                        root.settings-open = false;
+                        root.shortcuts-open = true;
+                    }
+                }
+                HorizontalLayout {
+                    padding-left: 8px; spacing: 8px;
+                    Text { text: "\u{E312}"; font-family: "Material Icons"; // keyboard
+                           color: Theme.text-secondary; font-size: Theme.fs-sm;
+                           vertical-alignment: center; }
+                    Text { text: root.lang-en ? "Shortcuts" : "快捷键";
                            color: Theme.text-primary; font-size: Theme.fs-md;
                            vertical-alignment: center; horizontal-stretch: 1; }
                 }
@@ -1470,6 +1839,7 @@ export component AppWindow inherits Window {
                 ge-input := LineEdit {
                     text <=> root.group-dialog-name;
                     font-family: Theme.ui-font-family; // CJK-capable (#54)
+                    placeholder-text: @tr("Group name");
                     // Enter confirms when non-empty.
                     accepted => {
                         if (root.group-dialog-name != "") {
@@ -1545,11 +1915,18 @@ export component AppWindow inherits Window {
                     }
                 }
 
-                // Add form: name + command + Add.
+                // Add / edit form: name + group (optional) + command.
                 Text { text: @tr("Name"); color: Theme.text-secondary; font-size: Theme.fs-sm; }
                 qcm-name-in := LineEdit {
                     text <=> root.qcm-name;
                     font-family: Theme.ui-font-family;
+                    placeholder-text: @tr("e.g. tail log");
+                }
+                Text { text: @tr("Group (optional)"); color: Theme.text-secondary; font-size: Theme.fs-sm; }
+                qcm-group-in := LineEdit {
+                    text <=> root.qcm-group;
+                    font-family: Theme.ui-font-family;
+                    placeholder-text: @tr("leave empty → default");
                 }
                 Text { text: @tr("Command"); color: Theme.text-secondary; font-size: Theme.fs-sm; }
                 HorizontalLayout {
@@ -1558,21 +1935,50 @@ export component AppWindow inherits Window {
                         horizontal-stretch: 1;
                         text <=> root.qcm-command;
                         font-family: Theme.ui-font-family;
+                        placeholder-text: "tail -f /var/log/syslog";
                         accepted => {
                             if (root.qcm-name != "" && root.qcm-command != "") {
-                                root.add-quick-command(root.qcm-name, root.qcm-command);
-                                root.qcm-name = ""; root.qcm-command = "";
+                                if (root.qcm-edit-index >= 0) {
+                                    root.save-quick-command(root.qcm-edit-index, root.qcm-name, root.qcm-command, root.qcm-group);
+                                } else {
+                                    root.add-quick-command(root.qcm-name, root.qcm-command, root.qcm-group);
+                                }
+                                root.qcm-edit-index = -1;
+                                root.qcm-name = ""; root.qcm-command = ""; root.qcm-group = "";
                             }
                         }
                     }
+                    // Cancel only while editing an existing entry.
+                    if root.qcm-edit-index >= 0 : Button {
+                        text: root.lang-en ? "Cancel" : "取消";
+                        clicked => {
+                            root.qcm-edit-index = -1;
+                            root.qcm-name = ""; root.qcm-command = ""; root.qcm-group = "";
+                        }
+                    }
                     Button {
-                        text: root.lang-en ? "Add" : "添加";
+                        text: root.qcm-edit-index >= 0 ? (root.lang-en ? "Save" : "保存")
+                                                       : (root.lang-en ? "Add" : "添加");
                         primary: true;
                         enabled: root.qcm-name != "" && root.qcm-command != "";
                         clicked => {
-                            root.add-quick-command(root.qcm-name, root.qcm-command);
-                            root.qcm-name = ""; root.qcm-command = "";
+                            if (root.qcm-edit-index >= 0) {
+                                root.save-quick-command(root.qcm-edit-index, root.qcm-name, root.qcm-command, root.qcm-group);
+                            } else {
+                                root.add-quick-command(root.qcm-name, root.qcm-command, root.qcm-group);
+                            }
+                            root.qcm-edit-index = -1;
+                            root.qcm-name = ""; root.qcm-command = ""; root.qcm-group = "";
                         }
+                    }
+                }
+
+                // New (empty) group.
+                HorizontalLayout {
+                    Rectangle { horizontal-stretch: 1; }
+                    Button {
+                        text: root.lang-en ? "+ New group" : "+ 新建分组";
+                        clicked => { root.qcg-orig = ""; root.qcg-name = ""; root.qcg-open = true; }
                     }
                 }
 
@@ -1590,35 +1996,223 @@ export component AppWindow inherits Window {
                             text: @tr("No quick commands yet");
                             color: Theme.text-muted; font-size: Theme.fs-xs;
                         }
-                        for q[i] in root.quick-commands : Rectangle {
-                            height: 38px;
-                            border-radius: Theme.radius-sm;
-                            background: Theme.bg-root;
-                            HorizontalLayout {
-                                padding-left: 8px; padding-right: 6px; spacing: 4px;
-                                VerticalLayout {
-                                    horizontal-stretch: 1;
-                                    alignment: center;
-                                    Text { text: q.name; color: Theme.text-primary; font-size: Theme.fs-sm;
-                                           overflow: elide; }
-                                    Text { text: q.command; color: Theme.text-muted; font-size: Theme.fs-xs;
-                                           overflow: elide; font-family: Theme.ui-font-family; }
+                        for q in root.quick-commands : VerticalLayout {
+                            // Group header on the first row of each group (#55).
+                            // Right-click to rename / delete (empty) / new group.
+                            if q.group-header != "" : Rectangle {
+                                height: 26px;
+                                property <length> gmx;
+                                property <length> gmy;
+                                HorizontalLayout {
+                                    padding-left: 4px; padding-top: 6px; spacing: 4px;
+                                    Text { text: "\u{E2C7}"; font-family: "Material Icons";
+                                           color: Theme.text-muted; font-size: Theme.fs-sm; vertical-alignment: center; }
+                                    Text { text: q.group; color: Theme.text-muted; font-size: Theme.fs-xs;
+                                           font-weight: 700; vertical-alignment: center;
+                                           horizontal-stretch: 1; horizontal-alignment: left; }
                                 }
-                                Rectangle {
-                                    width: 28px;
-                                    y: (parent.height - self.height) / 2;
-                                    height: 28px;
-                                    border-radius: Theme.radius-sm;
-                                    background: del-ta.has-hover ? Theme.danger.with-alpha(0.18) : transparent;
-                                    del-ta := TouchArea {
-                                        mouse-cursor: pointer;
-                                        clicked => { root.delete-quick-command(i); }
+                                TouchArea {
+                                    clicked => { }  // grab so right-click pointer-events register inside the Flickable
+                                    pointer-event(e) => {
+                                        if (e.kind == PointerEventKind.down && e.button == PointerEventButton.right) {
+                                            gmx = self.mouse-x; gmy = self.mouse-y; qgrp-menu.show();
+                                        }
                                     }
-                                    Text { text: "\u{E872}"; font-family: "Material Icons";
-                                           color: Theme.danger; font-size: Theme.fs-md;
-                                           horizontal-alignment: center; vertical-alignment: center; }
+                                }
+                                qgrp-menu := PopupWindow {
+                                    x: gmx; y: gmy; width: 150px;
+                                    height: (q.orig-index == -1 ? 3 : 2) * 30px + 9px;
+                                    Rectangle {
+                                        background: Theme.bg-panel; border-radius: Theme.radius-sm;
+                                        border-width: 1px; border-color: Theme.border-strong;
+                                        drop-shadow-blur: 10px; drop-shadow-color: #00000050;
+                                        VerticalLayout {
+                                            padding: 4px; spacing: 1px;
+                                            Rectangle {
+                                                height: 30px; border-radius: Theme.radius-sm;
+                                                background: qeg-ta.has-hover ? Theme.bg-hover : transparent;
+                                                qeg-ta := TouchArea { mouse-cursor: pointer;
+                                                    clicked => { root.qcg-orig = q.group; root.qcg-name = q.group; root.qcg-open = true; } }
+                                                HorizontalLayout { padding-left: 10px; spacing: 8px;
+                                                    Text { text: "\u{E3C9}"; font-family: "Material Icons"; color: Theme.text-secondary; font-size: Theme.fs-sm; vertical-alignment: center; }
+                                                    Text { text: root.lang-en ? "Rename group" : "重命名分组"; color: Theme.text-primary; font-size: Theme.fs-md; vertical-alignment: center; horizontal-stretch: 1; } }
+                                            }
+                                            if q.orig-index == -1 : Rectangle {
+                                                height: 30px; border-radius: Theme.radius-sm;
+                                                background: qdg-ta.has-hover ? #cc333320 : transparent;
+                                                qdg-ta := TouchArea { mouse-cursor: pointer; clicked => { root.delete-quick-group(q.group); } }
+                                                HorizontalLayout { padding-left: 10px; spacing: 8px;
+                                                    Text { text: "\u{E872}"; font-family: "Material Icons"; color: #cc3333; font-size: Theme.fs-sm; vertical-alignment: center; }
+                                                    Text { text: root.lang-en ? "Delete group" : "删除分组"; color: #cc3333; font-size: Theme.fs-md; vertical-alignment: center; horizontal-stretch: 1; } }
+                                            }
+                                            Rectangle {
+                                                height: 30px; border-radius: Theme.radius-sm;
+                                                background: qng-ta.has-hover ? Theme.bg-hover : transparent;
+                                                qng-ta := TouchArea { mouse-cursor: pointer; clicked => { root.qcg-orig = ""; root.qcg-name = ""; root.qcg-open = true; } }
+                                                HorizontalLayout { padding-left: 10px; spacing: 8px;
+                                                    Text { text: "\u{E2CC}"; font-family: "Material Icons"; color: Theme.text-secondary; font-size: Theme.fs-sm; vertical-alignment: center; }
+                                                    Text { text: root.lang-en ? "New group" : "新建分组"; color: Theme.text-primary; font-size: Theme.fs-md; vertical-alignment: center; horizontal-stretch: 1; } }
+                                            }
+                                        }
+                                    }
                                 }
                             }
+
+                            // Command row (skip the empty-group placeholder).
+                            if q.orig-index >= 0 : Rectangle {
+                                height: 38px;
+                                border-radius: Theme.radius-sm;
+                                background: Theme.bg-root;
+                                property <length> ctx-x;
+                                property <length> ctx-y;
+                                item-ta := TouchArea {
+                                    clicked => { }  // grab so right-click pointer-events register inside the Flickable
+                                    pointer-event(e) => {
+                                        if (e.kind == PointerEventKind.down && e.button == PointerEventButton.right) {
+                                            ctx-x = self.mouse-x; ctx-y = self.mouse-y; qctx-menu.show();
+                                        }
+                                    }
+                                }
+                                HorizontalLayout {
+                                    padding-left: 8px; padding-right: 6px; spacing: 6px;
+                                    VerticalLayout {
+                                        horizontal-stretch: 1;
+                                        alignment: center;
+                                        Text { text: q.name; color: Theme.text-primary; font-size: Theme.fs-sm;
+                                               overflow: elide; }
+                                        Text { text: q.command; color: Theme.text-muted; font-size: Theme.fs-xs;
+                                               overflow: elide; font-family: Theme.ui-font-family; }
+                                    }
+                                    Rectangle {
+                                        width: 28px;
+                                        y: (parent.height - self.height) / 2;
+                                        height: 28px;
+                                        border-radius: Theme.radius-sm;
+                                        background: del-ta.has-hover ? Theme.danger.with-alpha(0.18) : transparent;
+                                        del-ta := TouchArea {
+                                            mouse-cursor: pointer;
+                                            clicked => { root.delete-quick-command(q.orig-index); }
+                                        }
+                                        Text { text: "\u{E872}"; font-family: "Material Icons";
+                                               color: Theme.danger; font-size: Theme.fs-md;
+                                               horizontal-alignment: center; vertical-alignment: center; }
+                                    }
+                                }
+                                qctx-menu := PopupWindow {
+                                    x: ctx-x; y: ctx-y; width: 160px;
+                                    height: qctx-vl.preferred-height;
+                                    Rectangle {
+                                        background: Theme.bg-panel; border-radius: Theme.radius-sm;
+                                        border-width: 1px; border-color: Theme.border-strong;
+                                        drop-shadow-blur: 10px; drop-shadow-color: #00000050;
+                                        qctx-vl := VerticalLayout {
+                                            padding: 4px; spacing: 1px;
+                                            Rectangle { height: 28px; border-radius: Theme.radius-sm;
+                                                background: qe-ta.has-hover ? Theme.bg-hover : transparent;
+                                                qe-ta := TouchArea { mouse-cursor: pointer; clicked => { root.edit-quick-command(q.orig-index); } }
+                                                HorizontalLayout { padding-left: 10px; spacing: 8px;
+                                                    Text { text: "\u{E3C9}"; font-family: "Material Icons"; color: Theme.text-secondary; font-size: Theme.fs-sm; vertical-alignment: center; }
+                                                    Text { text: @tr("Edit"); color: Theme.text-primary; font-size: Theme.fs-md; vertical-alignment: center; horizontal-stretch: 1; } } }
+                                            Rectangle { height: 28px; border-radius: Theme.radius-sm;
+                                                background: qd-ta.has-hover ? Theme.bg-hover : transparent;
+                                                qd-ta := TouchArea { mouse-cursor: pointer; clicked => { root.duplicate-quick-command(q.orig-index); } }
+                                                HorizontalLayout { padding-left: 10px; spacing: 8px;
+                                                    Text { text: "\u{E14D}"; font-family: "Material Icons"; color: Theme.text-secondary; font-size: Theme.fs-sm; vertical-alignment: center; }
+                                                    Text { text: @tr("Duplicate"); color: Theme.text-primary; font-size: Theme.fs-md; vertical-alignment: center; horizontal-stretch: 1; } } }
+                                            Rectangle { height: 28px; border-radius: Theme.radius-sm;
+                                                background: qx-ta.has-hover ? #cc333320 : transparent;
+                                                qx-ta := TouchArea { mouse-cursor: pointer; clicked => { root.delete-quick-command(q.orig-index); } }
+                                                HorizontalLayout { padding-left: 10px; spacing: 8px;
+                                                    Text { text: "\u{E872}"; font-family: "Material Icons"; color: #cc3333; font-size: Theme.fs-sm; vertical-alignment: center; }
+                                                    Text { text: @tr("Delete"); color: #cc3333; font-size: Theme.fs-md; vertical-alignment: center; horizontal-stretch: 1; } } }
+                                            Rectangle { height: 1px; background: Theme.border-subtle; }
+                                            HorizontalLayout { padding-left: 10px; padding-top: 2px; spacing: 6px;
+                                                Text { text: "\u{E2C7}"; font-family: "Material Icons"; color: Theme.text-muted; font-size: Theme.fs-xs; vertical-alignment: center; }
+                                                Text { text: @tr("Move to"); color: Theme.text-muted; font-size: Theme.fs-xs; vertical-alignment: center; horizontal-stretch: 1; } }
+                                            if q.group != "default" : Rectangle { height: 28px; border-radius: Theme.radius-sm;
+                                                background: qmd-ta.has-hover ? Theme.bg-hover : transparent;
+                                                qmd-ta := TouchArea { mouse-cursor: pointer; clicked => { root.move-quick-command(q.orig-index, "default"); } }
+                                                HorizontalLayout { padding-left: 10px; spacing: 8px;
+                                                    Text { text: "\u{E2C7}"; font-family: "Material Icons"; color: Theme.text-secondary; font-size: Theme.fs-sm; vertical-alignment: center; }
+                                                    Text { text: "default"; color: Theme.text-primary; font-size: Theme.fs-md; vertical-alignment: center; horizontal-stretch: 1; } } }
+                                            for s in root.quick-commands : Rectangle {
+                                                visible: s.group-header != "" && s.group != "default" && s.group != q.group;
+                                                height: self.visible ? 28px : 0px;
+                                                border-radius: Theme.radius-sm;
+                                                background: qm-ta.has-hover ? Theme.bg-hover : transparent;
+                                                qm-ta := TouchArea { mouse-cursor: pointer; clicked => { root.move-quick-command(q.orig-index, s.group); } }
+                                                HorizontalLayout { padding-left: 10px; spacing: 8px;
+                                                    Text { text: "\u{E2C7}"; font-family: "Material Icons"; color: Theme.text-secondary; font-size: Theme.fs-sm; vertical-alignment: center; }
+                                                    Text { text: s.group; color: Theme.text-primary; font-size: Theme.fs-md; vertical-alignment: center; horizontal-stretch: 1; overflow: elide; } } }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // --- Quick-command group name dialog (#55): new / rename --------------
+    if root.qcg-open : Rectangle {
+        width: parent.width;
+        height: parent.height;
+        background: #00000080;
+        TouchArea { clicked => { root.qcg-open = false; } }
+
+        Rectangle {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            width: 340px;
+            height: 178px;
+            background: Theme.bg-panel;
+            border-radius: Theme.radius-md;
+            border-width: 1px;
+            border-color: Theme.border-strong;
+            drop-shadow-blur: 24px;
+            drop-shadow-color: #000000a0;
+            TouchArea {}   // swallow inside clicks
+
+            VerticalLayout {
+                padding: 18px;
+                spacing: 12px;
+                Text {
+                    text: root.qcg-orig == ""
+                        ? (root.lang-en ? "New group" : "新建分组")
+                        : (root.lang-en ? "Rename group" : "重命名分组");
+                    color: Theme.text-primary;
+                    font-size: Theme.fs-lg;
+                    font-weight: 700;
+                }
+                Text { text: @tr("Group name"); color: Theme.text-secondary; font-size: Theme.fs-sm; }
+                qcg-input := LineEdit {
+                    text <=> root.qcg-name;
+                    font-family: Theme.ui-font-family;
+                    placeholder-text: @tr("Group name");
+                    accepted => {
+                        if (root.qcg-name != "") {
+                            root.submit-quick-group(root.qcg-orig, root.qcg-name);
+                            root.qcg-open = false;
+                        }
+                    }
+                }
+                Rectangle { vertical-stretch: 1; }
+                HorizontalLayout {
+                    alignment: end;
+                    spacing: 8px;
+                    Button {
+                        text: root.lang-en ? "Cancel" : "取消";
+                        clicked => { root.qcg-open = false; }
+                    }
+                    Button {
+                        text: root.lang-en ? "OK" : "确定";
+                        primary: true;
+                        enabled: root.qcg-name != "";
+                        clicked => {
+                            root.submit-quick-group(root.qcg-orig, root.qcg-name);
+                            root.qcg-open = false;
                         }
                     }
                 }
@@ -1671,6 +2265,7 @@ export component AppWindow inherits Window {
                 sp-input := LineEdit {
                     text <=> root.sftp-prompt-value;
                     font-family: Theme.ui-font-family; // CJK-capable (#54)
+                    placeholder-text: root.sftp-prompt-kind == "chmod" ? "755" : "";
                     accepted => {
                         if (root.sftp-prompt-value != "") {
                             root.sftp-prompt-submit(
@@ -1845,7 +2440,302 @@ export component AppWindow inherits Window {
         }
     }
 
-    // --- Interface settings dialog (font family + size) -------------------
+
+    // --- Keyboard shortcuts dialog (#103) ---------------------------------
+    Rectangle {
+        width: parent.width;
+        height: parent.height;
+        visible: root.shortcuts-open;
+        background: #00000080;
+        TouchArea { clicked => { root.shortcuts-open = false; } }
+
+        Rectangle {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            width: 424px;
+            height: 432px;
+            background: Theme.bg-panel;
+            border-radius: Theme.radius-md;
+            border-width: 1px;
+            border-color: Theme.border-strong;
+            drop-shadow-blur: 24px;
+            drop-shadow-color: #000000a0;
+            TouchArea {}
+
+            VerticalLayout {
+                padding: 18px;
+                spacing: 5px;
+
+                HorizontalLayout {
+                    Text {
+                        text: root.lang-en ? "Keyboard shortcuts" : "快捷键";
+                        color: Theme.text-primary;
+                        font-size: Theme.fs-lg;
+                        font-weight: 700;
+                        horizontal-stretch: 1;
+                        vertical-alignment: center;
+                    }
+                    Rectangle {
+                        width: 22px; height: 22px;
+                        border-radius: Theme.radius-sm;
+                        background: sc-close.has-hover ? Theme.bg-hover : transparent;
+                        sc-close := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { root.shortcuts-open = false; }
+                        }
+                        Text { text: "\u{E5CD}"; font-family: "Material Icons";
+                               color: Theme.text-secondary; font-size: Theme.fs-sm;
+                               horizontal-alignment: center; vertical-alignment: center; }
+                    }
+                }
+
+                Text { text: root.lang-en ? "Terminal" : "终端";
+                       color: Theme.text-muted; font-size: Theme.fs-xs; }
+                ShortcutRow { keys: "Ctrl+Shift+C"; desc: root.lang-en ? "Copy selection" : "复制选中内容"; }
+                ShortcutRow { keys: "Ctrl+V"; desc: root.lang-en ? "Paste" : "粘贴"; }
+                ShortcutRow { keys: root.lang-en ? "Drag" : "鼠标拖动"; desc: root.lang-en ? "Select text" : "选择文本"; }
+                ShortcutRow { keys: root.lang-en ? "Wheel / Scrollbar" : "滚轮 / 滚动条"; desc: root.lang-en ? "Scroll history" : "滚动历史"; }
+
+                Rectangle { height: 6px; }
+                Text { text: root.lang-en ? "Command box" : "命令输入框";
+                       color: Theme.text-muted; font-size: Theme.fs-xs; }
+                ShortcutRow { keys: "Enter"; desc: root.lang-en ? "Send command" : "发送命令"; }
+                ShortcutRow { keys: "↑ / ↓"; desc: root.lang-en ? "Previous / next in history" : "上一条 / 下一条历史"; }
+                ShortcutRow { keys: "Ctrl+A"; desc: root.lang-en ? "Move to start of line" : "移到行首"; }
+                ShortcutRow { keys: "Ctrl+E"; desc: root.lang-en ? "Move to end of line" : "移到行尾"; }
+                ShortcutRow { keys: "Ctrl+K"; desc: root.lang-en ? "Delete to end of line" : "删除到行尾"; }
+                ShortcutRow { keys: "Ctrl+U"; desc: root.lang-en ? "Delete to start of line" : "删除到行首"; }
+
+                Rectangle { vertical-stretch: 1; }
+            }
+        }
+    }
+
+    // --- About dialog (centered on the window, with dim backdrop) ---------
+    Rectangle {
+        width: parent.width;
+        height: parent.height;
+        visible: root.about-open;
+        background: #00000080;            // dim backdrop
+        TouchArea { clicked => { root.about-open = false; } }
+
+        Rectangle {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            width: 380px;
+            height: 440px;
+            background: Theme.bg-panel;
+            border-radius: Theme.radius-md;
+            border-width: 1px;
+            border-color: Theme.border-strong;
+            drop-shadow-blur: 24px;
+            drop-shadow-color: #000000a0;
+
+            // Swallow clicks so the backdrop doesn't close when clicking inside.
+            TouchArea {}
+
+            VerticalLayout {
+                padding: 18px;
+                spacing: 8px;
+
+                HorizontalLayout {
+                    Text {
+                        text: @tr("About rusterm");
+                        color: Theme.text-primary;
+                        font-size: Theme.fs-lg;
+                        font-weight: 700;
+                        horizontal-stretch: 1;
+                        vertical-alignment: center;
+                    }
+                    Rectangle {
+                        width: 22px; height: 22px;
+                        border-radius: Theme.radius-sm;
+                        background: ab-close-ta.has-hover ? Theme.bg-hover : transparent;
+                        ab-close-ta := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { root.about-open = false; }
+                        }
+                        Text { text: "\u{E5CD}"; font-family: "Material Icons";
+                               color: Theme.text-secondary; font-size: Theme.fs-sm;
+                               horizontal-alignment: center; vertical-alignment: center; }
+                    }
+                }
+
+                Text {
+                    text: @tr("A lightweight Rust + Slint SSH terminal client by 'lil meatball'.");
+                    color: Theme.text-secondary;
+                    font-size: Theme.fs-sm;
+                    wrap: word-wrap;
+                }
+                Text {
+                    text: @tr("Open source · MIT / Apache-2.0");
+                    color: Theme.text-muted;
+                    font-size: Theme.fs-xs;
+                }
+
+                Rectangle { height: 1px; background: Theme.border-subtle; }
+
+                Text {
+                    text: @tr("Open-source libraries used");
+                    color: Theme.text-secondary;
+                    font-size: Theme.fs-sm;
+                }
+
+                Flickable {
+                    vertical-stretch: 1;
+                    viewport-width: self.width;
+                    viewport-height: max(self.height, libs-col.preferred-height);
+                    libs-col := VerticalLayout {
+                        alignment: start;
+                        spacing: 4px;
+                        for lib in root.about-libs : Text {
+                            text: lib;
+                            color: Theme.text-primary;
+                            font-size: Theme.fs-xs;
+                            wrap: no-wrap;
+                            overflow: elide;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // --- Modal dialog -----------------------------------------------------
+    SessionDialog {
+        width: parent.width;
+        height: parent.height;
+        is-open <=> root.dialog-open;
+        is-editing <=> root.dialog-editing;
+        draft-id <=> root.dialog-id;
+        draft-name <=> root.dialog-name;
+        draft-host <=> root.dialog-host;
+        draft-port <=> root.dialog-port;
+        draft-user <=> root.dialog-user;
+        draft-auth <=> root.dialog-auth;
+        draft-password <=> root.dialog-password;
+        draft-key-path <=> root.dialog-key-path;
+        draft-proxy-type <=> root.dialog-proxy-type;
+        draft-proxy-hostport <=> root.dialog-proxy-hostport;
+        draft-group <=> root.dialog-group;
+        draft-kind <=> root.dialog-kind;
+        draft-serial-port <=> root.dialog-serial-port;
+        draft-baud <=> root.dialog-baud;
+        draft-data-bits <=> root.dialog-data-bits;
+        draft-stop-bits <=> root.dialog-stop-bits;
+        draft-parity <=> root.dialog-parity;
+        draft-flow <=> root.dialog-flow;
+        forwards: root.dialog-forwards;
+        submit(draft) => { root.session-dialog-submit(draft); }
+        cancel => { root.session-dialog-cancel(); }
+        pick-key-file => { root.session-dialog-pick-key(); }
+        add-forward(n, k, b, p, h, hp) => { root.add-forward(n, k, b, p, h, hp); }
+        delete-forward(i) => { root.delete-forward(i); }
+    }
+
+    // --- Delete confirmation (#28) ----------------------------------------
+    ConfirmDialog {
+        width: parent.width;
+        height: parent.height;
+        is-open <=> root.confirm-delete-open;
+        title: @tr("Confirm delete");
+        message: root.confirm-delete-batch
+            ? (root.lang-en ? "Delete the checked items? This cannot be undone."
+                            : "删除选中的多个项目?此操作不可撤销。")
+            : @tr("Delete this item? This cannot be undone.");
+        detail: root.confirm-delete-path;
+        confirm-label: @tr("Delete");
+        confirm => {
+            if (root.confirm-delete-batch) {
+                root.sftp-delete-selected(root.confirm-delete-tab);
+                root.confirm-delete-batch = false;
+            } else {
+                root.sftp-delete(root.confirm-delete-tab, root.confirm-delete-path);
+            }
+            root.confirm-delete-open = false;
+        }
+        cancel => { root.confirm-delete-batch = false; root.confirm-delete-open = false; }
+    }
+
+    // Host-key confirmation (#109-5). Reuses the confirm-dialog card; the
+    // backdrop / Cancel both reject (safe default = don't connect).
+    ConfirmDialog {
+        width: parent.width;
+        height: parent.height;
+        is-open <=> root.hostkey-prompt-open;
+        title: root.hostkey-title;
+        message: root.hostkey-message;
+        detail: root.hostkey-detail;
+        confirm-label: root.hostkey-confirm-label;
+        confirm => { root.hostkey-accept(); }
+        cancel => { root.hostkey-reject(); }
+    }
+
+    // Connect-time credential prompt (#110). Backdrop / Cancel abort the connect.
+    if root.cred-prompt-open : Rectangle {
+        width: parent.width;
+        height: parent.height;
+        background: #000000aa;
+        TouchArea { clicked => { root.cred-reject(); } }
+        Rectangle {
+            width: 360px;
+            height: cred-card.preferred-height;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            background: Theme.bg-panel;
+            border-radius: Theme.radius-lg;
+            border-width: 1px;
+            border-color: Theme.border-strong;
+            drop-shadow-blur: 24px;
+            drop-shadow-color: #00000080;
+            TouchArea {}   // swallow clicks inside the card
+            cred-card := VerticalLayout {
+                padding: 20px;
+                spacing: 12px;
+                Text {
+                    text: @tr("Login");
+                    color: Theme.text-primary;
+                    font-size: Theme.fs-xl;
+                    font-weight: 600;
+                }
+                Text {
+                    text: root.cred-host;
+                    color: Theme.text-secondary;
+                    font-family: Theme.font-mono;
+                    font-size: Theme.fs-sm;
+                }
+                if root.cred-need-user : LabeledInput {
+                    label: @tr("Username");
+                    placeholder: "root";
+                    value <=> root.cred-user;
+                }
+                if root.cred-need-password : LabeledInput {
+                    label: @tr("Password");
+                    placeholder: "••••••••";
+                    password: true;
+                    value <=> root.cred-password;
+                }
+                CheckBox {
+                    text: @tr("Remember for this session");
+                    checked <=> root.cred-remember;
+                }
+                HorizontalLayout {
+                    alignment: end;
+                    spacing: 8px;
+                    GhostButton {
+                        text: @tr("Cancel");
+                        clicked => { root.cred-reject(); }
+                    }
+                    PrimaryButton {
+                        text: @tr("Connect");
+                        clicked => { root.cred-accept(); }
+                    }
+                }
+            }
+        }
+    }
+
+        // --- Interface settings dialog (font family + size) -------------------
     if root.interface-open : Rectangle {
         width: parent.width;
         height: parent.height;
@@ -2780,144 +3670,6 @@ export component AppWindow inherits Window {
         }  // dialog Rectangle
     }  // if interface-open
 
-    // --- About dialog (centered on the window, with dim backdrop) ---------
-    Rectangle {
-        width: parent.width;
-        height: parent.height;
-        visible: root.about-open;
-        background: #00000080;            // dim backdrop
-        TouchArea { clicked => { root.about-open = false; } }
-
-        Rectangle {
-            x: (parent.width - self.width) / 2;
-            y: (parent.height - self.height) / 2;
-            width: 380px;
-            height: 440px;
-            background: Theme.bg-panel;
-            border-radius: Theme.radius-md;
-            border-width: 1px;
-            border-color: Theme.border-strong;
-            drop-shadow-blur: 24px;
-            drop-shadow-color: #000000a0;
-
-            // Swallow clicks so the backdrop doesn't close when clicking inside.
-            TouchArea {}
-
-            VerticalLayout {
-                padding: 18px;
-                spacing: 8px;
-
-                HorizontalLayout {
-                    Text {
-                        text: @tr("About rusterm");
-                        color: Theme.text-primary;
-                        font-size: Theme.fs-lg;
-                        font-weight: 700;
-                        horizontal-stretch: 1;
-                        vertical-alignment: center;
-                    }
-                    Rectangle {
-                        width: 22px; height: 22px;
-                        border-radius: Theme.radius-sm;
-                        background: ab-close-ta.has-hover ? Theme.bg-hover : transparent;
-                        ab-close-ta := TouchArea {
-                            mouse-cursor: pointer;
-                            clicked => { root.about-open = false; }
-                        }
-                        Text { text: "\u{E5CD}"; font-family: "Material Icons";
-                               color: Theme.text-secondary; font-size: Theme.fs-sm;
-                               horizontal-alignment: center; vertical-alignment: center; }
-                    }
-                }
-
-                Text {
-                    text: @tr("A Rust + Slint SSH terminal client by 'lil meatball'.");
-                    color: Theme.text-secondary;
-                    font-size: Theme.fs-sm;
-                    wrap: word-wrap;
-                }
-                Text {
-                    text: @tr("Open source · MIT / Apache-2.0");
-                    color: Theme.text-muted;
-                    font-size: Theme.fs-xs;
-                }
-
-                Rectangle { height: 1px; background: Theme.border-subtle; }
-
-                Text {
-                    text: @tr("Open-source libraries used");
-                    color: Theme.text-secondary;
-                    font-size: Theme.fs-sm;
-                }
-
-                Flickable {
-                    vertical-stretch: 1;
-                    viewport-width: self.width;
-                    viewport-height: max(self.height, libs-col.preferred-height);
-                    libs-col := VerticalLayout {
-                        alignment: start;
-                        spacing: 4px;
-                        for lib in root.about-libs : Text {
-                            text: lib;
-                            color: Theme.text-primary;
-                            font-size: Theme.fs-xs;
-                            wrap: no-wrap;
-                            overflow: elide;
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // --- Modal dialog -----------------------------------------------------
-    SessionDialog {
-        width: parent.width;
-        height: parent.height;
-        is-open <=> root.dialog-open;
-        is-editing <=> root.dialog-editing;
-        draft-id <=> root.dialog-id;
-        draft-name <=> root.dialog-name;
-        draft-host <=> root.dialog-host;
-        draft-port <=> root.dialog-port;
-        draft-user <=> root.dialog-user;
-        draft-auth <=> root.dialog-auth;
-        draft-password <=> root.dialog-password;
-        draft-key-path <=> root.dialog-key-path;
-        draft-proxy-type <=> root.dialog-proxy-type;
-        draft-proxy-hostport <=> root.dialog-proxy-hostport;
-        draft-group <=> root.dialog-group;
-        draft-kind <=> root.dialog-kind;
-        draft-serial-port <=> root.dialog-serial-port;
-        draft-baud <=> root.dialog-baud;
-        draft-data-bits <=> root.dialog-data-bits;
-        draft-stop-bits <=> root.dialog-stop-bits;
-        draft-parity <=> root.dialog-parity;
-        draft-flow <=> root.dialog-flow;
-        forwards: root.dialog-forwards;
-        submit(draft) => { root.session-dialog-submit(draft); }
-        cancel => { root.session-dialog-cancel(); }
-        pick-key-file => { root.session-dialog-pick-key(); }
-        add-forward(k, b, p, h, hp) => { root.add-forward(k, b, p, h, hp); }
-        delete-forward(i) => { root.delete-forward(i); }
-    }
-
-    // --- Delete confirmation (#28) ----------------------------------------
-    ConfirmDialog {
-        width: parent.width;
-        height: parent.height;
-        is-open <=> root.confirm-delete-open;
-        title: @tr("Confirm delete");
-        message: @tr("Delete this item? This cannot be undone.");
-        detail: root.confirm-delete-path;
-        confirm-label: @tr("Delete");
-        confirm => {
-            root.sftp-delete(root.confirm-delete-tab, root.confirm-delete-path);
-            root.confirm-delete-open = false;
-        }
-        cancel => { root.confirm-delete-open = false; }
-    }
-
     // ── WebDAV sync dialog ──
     WebDavDialog {
         open: root.show-webdav-dialog;
@@ -2937,8 +3689,7 @@ export component AppWindow inherits Window {
     }
 
     // ── 全局 Toast 提示（主窗口底部弹出） ──
-    in-out property <string> toast-text: "";
-    in-out property <bool> toast-visible: false;
+    // (toast-text / toast-visible already declared in the rusterm property block above)
 
     // Toast 定时器：2秒后自动隐藏
     toast-hide-timer := Timer {
@@ -2995,5 +3746,4 @@ export component AppWindow inherits Window {
         accept => { root.host-key-accepted(); }
         reject => { root.host-key-rejected(); }
     }
-
 }

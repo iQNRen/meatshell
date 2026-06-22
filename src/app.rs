@@ -16,8 +16,7 @@ use std::sync::{Arc, Mutex};
 pub(crate) static THEME_OVERRIDE: Mutex<ThemeOverride> = Mutex::new(ThemeOverride { fg_override: None });
 
 /// 主机密钥验证的响应通道（SSH 线程等待 UI 线程的用户决策）
-use tokio::sync::oneshot;
-pub(crate) static HOST_KEY_RESPONSE: Mutex<Option<oneshot::Sender<bool>>> = Mutex::new(None);
+pub(crate) static HOST_KEY_RESPONSE: Mutex<Option<crate::ssh::HostKeyResponder>> = Mutex::new(None);
 
 /// 主题覆盖配置
 pub(crate) struct ThemeOverride {
@@ -90,7 +89,7 @@ use crate::ssh::{
     format_mtime, format_size, spawn_session, ProcInfo, SessionCommand, SessionEvent,
     SessionHandle,
 };
-use crate::system::{format_bytes_per_sec, format_mem_mib, SystemSampler, SystemSnapshot};
+use crate::system::{format_bytes_per_sec, format_mem, SystemSampler, SystemSnapshot};
 
 type SftpHandles = Arc<Mutex<HashMap<String, SftpHandle>>>;
 /// Per-tab flag: once the user explicitly navigates via the SFTP tree or
@@ -209,6 +208,68 @@ pub fn run() -> Result<()> {
     #[cfg(target_os = "linux")]
     set_window_icon(&window);
 
+    // The window defaults to frameless + custom title bar (#119). macOS keeps
+    // its native decorations, so turn the custom bar off there.
+    #[cfg(target_os = "macos")]
+    window.set_custom_titlebar(false);
+
+    // --- Detachable process monitor window (#23) -----------------------------
+    // The process table is its own top-level OS window so it can be dragged
+    // outside the main window (or onto a second monitor). Both windows render
+    // the *same* VecModel, so the table stays live wherever it's parked; closing
+    // it just hides it, so reopening is instant.
+    let proc_rows_model: Rc<VecModel<ProcRow>> = Rc::new(VecModel::default());
+    window.set_proc_list(ModelRc::from(proc_rows_model.clone()));
+    let proc_win = ProcWindow::new().context("failed to build process window")?;
+    proc_win.set_custom_titlebar(cfg!(not(target_os = "macos")));
+    proc_win.set_proc_list(ModelRc::from(proc_rows_model.clone()));
+    {
+        // ✕ hides the window (data keeps flowing into the shared model).
+        let weak = proc_win.as_weak();
+        proc_win.on_close(move || {
+            if let Some(w) = weak.upgrade() {
+                let _ = w.hide();
+            }
+        });
+    }
+    {
+        // Frameless titlebar drag, via winit on the process window's own handle.
+        let weak = proc_win.as_weak();
+        proc_win.on_win_drag(move || {
+            if let Some(w) = weak.upgrade() {
+                w.window().with_winit_window(|ww| {
+                    let _ = ww.drag_window();
+                });
+            }
+        });
+    }
+    {
+        // Bottom-right resize grip.
+        use i_slint_backend_winit::winit::window::ResizeDirection;
+        let weak = proc_win.as_weak();
+        proc_win.on_win_resize_se(move || {
+            if let Some(w) = weak.upgrade() {
+                w.window().with_winit_window(|ww| {
+                    let _ = ww.drag_resize_window(ResizeDirection::SouthEast);
+                });
+            }
+        });
+    }
+    {
+        // The sidebar "Processes" button shows / focuses the window.
+        let win_weak = window.as_weak();
+        let proc_weak = proc_win.as_weak();
+        window.on_open_processes(move || {
+            let (Some(main), Some(pw)) = (win_weak.upgrade(), proc_weak.upgrade())
+            else {
+                return;
+            };
+            pw.set_host(main.get_connection_state());
+            sync_proc_theme(&main, &pw);
+            let _ = pw.show();
+            pw.window().with_winit_window(|ww| ww.focus_window());
+        });
+    }
     // Apply the saved UI language.  The Rust-side flag drives `i18n::t(...)`;
     // `apply_to_slint` selects the bundled `.po` for the static `@tr(...)` text
     // (must run after the first component exists, which it now does).
@@ -241,6 +302,7 @@ pub fn run() -> Result<()> {
             window.set_term_font_family(fam.into());
         }
         window.set_term_font_size(s.font_size() as f32);
+        window.set_ui_scale(s.ui_scale() as f32 / 100.0); // global UI zoom (#100)
     }
 
     // 加载快捷键配置到 UI
@@ -256,11 +318,14 @@ pub fn run() -> Result<()> {
     // Editable inputs (e.g. the SFTP path bar) need a CJK-capable font: the
     // embedded Cascadia Mono has no Chinese glyphs and native TextInput doesn't
     // glyph-fallback like Text does, so typed Chinese would render as tofu (#54).
-    #[cfg(target_os = "windows")]
-    window.set_ui_font_family("Microsoft YaHei UI".into());
-    #[cfg(target_os = "macos")]
-    window.set_ui_font_family("PingFang SC".into());
-    // Linux: leave the Slint default (Noto Sans CJK is typically installed).
+    //
+    // We must NOT hard-code one system font name: on macOS 26 (Tahoe) fontdb
+    // failed to register "PingFang SC", so the UI default font resolved to nothing
+    // and *all* text vanished (#129) — icons survived only because they use an
+    // embedded font. Instead probe what fontdb actually loaded and pick the first
+    // resolvable CJK family, falling back to the embedded "Meatshell Mono" so the
+    // window is never fully blank even when the system font DB is unreadable.
+    window.set_ui_font_family(resolve_ui_font_family());
     // Populate the Interface font picker with installed monospace families.
     window.set_term_fonts(ModelRc::from(Rc::new(VecModel::from(system_monospace_fonts()))));
 
@@ -360,8 +425,12 @@ pub fn run() -> Result<()> {
         }
     }
 
-    // Command bar (#55): seed quick commands + history from the config.
-    window.set_quick_commands(quick_cmd_model(&store.borrow()));
+    // Command bar (#55): seed quick commands + history from the config. Groups
+    // start collapsed by default (#55).
+    window.set_quick_commands(quick_cmd_model(
+        &store.borrow(),
+        &all_quick_group_names(&store.borrow()),
+    ));
     window.set_command_history(history_model(&store.borrow()));
 
     // Interface setting: SFTP follows the terminal's cd. The shell event pumps
@@ -402,13 +471,26 @@ pub fn run() -> Result<()> {
         let collapse_sftp = s.collapse_sftp_default();
         window.set_collapse_sidebar_default(collapse_sidebar);
         window.set_collapse_sftp_default(collapse_sftp);
+        // Restore the persisted panel docking layout (#dock).
+        window.set_sidebar_width(s.sidebar_width());
+        window.set_sidebar_height(s.sidebar_height());
+        window.set_sidebar_dock(s.sidebar_dock().into());
+        window.set_sftp_panel_width(s.sftp_panel_width());
+        window.set_sftp_panel_height(s.sftp_panel_height());
+        window.set_sftp_dock(s.sftp_dock().into());
         if collapse_sidebar {
             window.set_sidebar_collapsed(true);
         }
         if collapse_sftp {
             window.set_sftp_collapsed(true);
-            window.set_sftp_saved_height(220.0);
-            window.set_sftp_panel_height(30.0);
+            window.set_sftp_saved_height(s.sftp_panel_height());
+        }
+        // Restore the user's preferred window size, if any (#dock).
+        let (ww, wh) = s.window_size();
+        if ww > 0.0 && wh > 0.0 {
+            window
+                .window()
+                .set_size(slint::LogicalSize::new(ww, wh));
         }
     }
     {
@@ -416,6 +498,14 @@ pub fn run() -> Result<()> {
         window.on_set_collapse_sidebar_default(move |v| {
             let mut s = store.borrow_mut();
             s.set_collapse_sidebar_default(v);
+            let _ = s.save();
+        });
+    }
+    {
+        let store = store.clone();
+        window.on_persist_sidebar_width(move |w| {
+            let mut s = store.borrow_mut();
+            s.set_sidebar_width(w);
             let _ = s.save();
         });
     }
@@ -454,6 +544,22 @@ pub fn run() -> Result<()> {
             }
             if let Some(w) = weak.upgrade() {
                 w.set_term_font_size(size as f32);
+            }
+        });
+    }
+    // Global UI scale (#100): persist the percent and apply it live.
+    {
+        let weak = window.as_weak();
+        let store = store.clone();
+        window.on_set_ui_scale(move |percent: i32| {
+            let clamped = (percent.max(0) as u32).clamp(80, 200);
+            {
+                let mut s = store.borrow_mut();
+                s.set_ui_scale(clamped);
+                let _ = s.save();
+            }
+            if let Some(w) = weak.upgrade() {
+                w.set_ui_scale(clamped as f32 / 100.0);
             }
         });
     }
@@ -767,10 +873,16 @@ pub fn run() -> Result<()> {
         let weak = window.as_weak();
         let store = store.clone();
         let bufs_theme = bufs.clone();
+        let proc_weak = proc_win.as_weak();
         window.on_toggle_theme(move || {
             let Some(w) = weak.upgrade() else { return };
             let next_dark = !w.get_dark_mode();
             w.set_dark_mode(next_dark);
+            // Mirror the flip onto the detached process window (its Theme global
+            // is a separate instance) so an open process window follows.
+            if let Some(p) = proc_weak.upgrade() {
+                sync_proc_theme(&w, &p);
+            }
             // Propagate new palette to all open terminal buffers.
             {
                 let mut map = bufs_theme.lock().unwrap();
@@ -854,8 +966,8 @@ pub fn run() -> Result<()> {
         window.on_host_key_accepted(move || {
             // 用户接受密钥，发送 true 给 SSH 线程
             if let Ok(mut guard) = HOST_KEY_RESPONSE.lock() {
-                if let Some(tx) = guard.take() {
-                    let _ = tx.send(true);
+                if let Some(responder) = guard.take() {
+                    responder.respond(true);
                 }
             }
             if let Some(w) = weak.upgrade() {
@@ -868,8 +980,8 @@ pub fn run() -> Result<()> {
         window.on_host_key_rejected(move || {
             // 用户拒绝密钥，发送 false 给 SSH 线程
             if let Ok(mut guard) = HOST_KEY_RESPONSE.lock() {
-                if let Some(tx) = guard.take() {
-                    let _ = tx.send(false);
+                if let Some(responder) = guard.take() {
+                    responder.respond(false);
                 }
             }
             if let Some(w) = weak.upgrade() {
@@ -998,6 +1110,19 @@ pub fn run() -> Result<()> {
         let tm = transfers_model.clone();
         window.on_clear_transfers(move || tm.set_vec(Vec::<TransferInfo>::new()));
     }
+    {
+        // Cancel a transfer by id. The id is a UUID unique across sessions, so we
+        // broadcast to every SFTP handle — only the owning one has it registered
+        // and will act on it (#100).
+        let sftp_handles = sftp_handles.clone();
+        window.on_cancel_transfer(move |id: SharedString| {
+            if let Ok(handles) = sftp_handles.lock() {
+                for h in handles.values() {
+                    h.cancel_transfer(id.to_string());
+                }
+            }
+        });
+    }
 
     // Open-source libraries shown in the About popup.
     {
@@ -1104,6 +1229,7 @@ pub fn run() -> Result<()> {
         let weak = window.as_weak();
         let sh = sftp_handles.clone();
         let close_handles = handles.clone();
+        let ev_store = store.clone();
         window.window().on_winit_window_event(move |_w, event| {
             match event {
                 WEvent::DroppedFile(path) => {
@@ -1122,6 +1248,10 @@ pub fn run() -> Result<()> {
                         }
                         return EventResult::PreventDefault;
                     }
+                    // No sessions → the window is about to close; persist layout.
+                    if let Some(win) = weak.upgrade() {
+                        save_layout(&win, &ev_store);
+                    }
                 }
                 _ => {}
             }
@@ -1129,9 +1259,16 @@ pub fn run() -> Result<()> {
         });
     }
     // Confirm-close dialog "Close" → actually quit the event loop (#88).
-    window.on_confirm_close_yes(|| {
-        let _ = slint::quit_event_loop();
-    });
+    {
+        let weak = window.as_weak();
+        let cc_store = store.clone();
+        window.on_confirm_close_yes(move || {
+            if let Some(w) = weak.upgrade() {
+                save_layout(&w, &cc_store);
+            }
+            let _ = slint::quit_event_loop();
+        });
+    }
 
 
     // ── WebDAV sync callbacks ──────────────────────────────────────────
@@ -1181,6 +1318,23 @@ pub fn run() -> Result<()> {
                     if let Some(w) = weak.upgrade() {
                         w.set_webdav_status(format!("{}: {e}", t("保存失败", "save error")).into());
                     }
+                }
+            }
+        });
+    }
+
+    // Window close: mirror the native-X behaviour and confirm if sessions are open.
+    {
+        let weak = window.as_weak();
+        let close_handles = handles.clone();
+        let wc_store = store.clone();
+        window.on_win_close(move || {
+            if let Some(w) = weak.upgrade() {
+                if close_handles.borrow().is_empty() {
+                    save_layout(&w, &wc_store);
+                    let _ = slint::quit_event_loop();
+                } else {
+                    w.set_confirm_close_open(true);
                 }
             }
         });
@@ -2027,7 +2181,8 @@ fn wire_session_callbacks(
         let weak = window.as_weak();
         let ef = edit_forwards.clone();
         window.on_add_forward(
-            move |kind: SharedString,
+            move |name: SharedString,
+                  kind: SharedString,
                   bind_addr: SharedString,
                   bind_port: i32,
                   host: SharedString,
@@ -2042,6 +2197,7 @@ fn wire_session_callbacks(
                 }
                 ef.borrow_mut().push(crate::config::PortForward {
                     kind,
+                    name: name.trim().to_string(),
                     bind_addr: bind_addr.trim().to_string(),
                     bind_port: bind_port as u16,
                     host: host.trim().to_string(),
@@ -2135,6 +2291,8 @@ fn wire_session_callbacks(
                 cursor_row: 0,
                 cursor_col: 0,
                 rows_used: 0,
+                scroll_max: 0,
+                scroll_offset: 0,
                 is_alt_screen: false,
                 find_matches: ModelRc::from(std::rc::Rc::new(VecModel::<TermMatch>::default())),
                 selection: ModelRc::from(std::rc::Rc::new(VecModel::<TermMatch>::default())),
@@ -2151,6 +2309,7 @@ fn wire_session_callbacks(
                 sftp_tree_nodes: ModelRc::from(
                     std::rc::Rc::new(VecModel::<SftpTreeNode>::default()),
                 ),
+                sftp_selected_count: 0,
             });
             // Create vt100 parser for this tab (default 24×80; resized on first
             // terminal-resize callback). 5000-line scrollback is stored for
@@ -2409,8 +2568,8 @@ fn disk_model(disks: &[(String, u64, u64)]) -> ModelRc<DiskInfo> {
 
 /// Build the process-monitor model for the popup (#23). `cpu`/`mem` are
 /// pre-formatted to one decimal; `cpu_frac` (0..1) drives the row's load bar.
-fn proc_model(procs: &[ProcInfo]) -> ModelRc<ProcRow> {
-    let rows: Vec<ProcRow> = procs
+fn proc_rows(procs: &[ProcInfo]) -> Vec<ProcRow> {
+    procs
         .iter()
         .map(|p| ProcRow {
             pid: p.pid.to_string().into(),
@@ -2420,20 +2579,136 @@ fn proc_model(procs: &[ProcInfo]) -> ModelRc<ProcRow> {
             command: p.command.clone().into(),
             cpu_frac: (p.cpu / 100.0).clamp(0.0, 1.0),
         })
-        .collect();
-    ModelRc::from(Rc::new(VecModel::from(rows)))
+        .collect()
+}
+
+/// Mirror the main window's theme/scale/UI-font onto the detached process
+/// window. Theme is a per-window Slint global, so a detached window keeps its
+/// compile-time (dark) defaults until we copy these across (#23).
+fn sync_proc_theme(main: &AppWindow, proc: &ProcWindow) {
+    proc.set_dark_mode(main.get_dark_mode());
+    proc.set_ui_scale(main.get_ui_scale());
+    proc.set_ui_font_family(main.get_ui_font_family());
+}
+
+/// Persist the current panel docking layout (both panels' edge + size) and the
+/// window size, so the next launch restores the user's arrangement. Called on
+/// every exit path (#dock).
+fn save_layout(win: &AppWindow, store: &Rc<RefCell<ConfigStore>>) {
+    let scale = win.window().scale_factor().max(0.01);
+    let size = win.window().size();
+    let w = size.width as f32 / scale;
+    let h = size.height as f32 / scale;
+    let mut s = store.borrow_mut();
+    s.set_sidebar_width(win.get_sidebar_width());
+    s.set_sidebar_height(win.get_sidebar_height());
+    s.set_sidebar_dock(win.get_sidebar_dock().to_string());
+    s.set_sftp_panel_width(win.get_sftp_panel_width());
+    s.set_sftp_panel_height(win.get_sftp_panel_height());
+    s.set_sftp_dock(win.get_sftp_dock().to_string());
+    // A maximized size isn't a useful "preferred" size to restore to, so only
+    // remember the windowed size.
+    if !win.get_window_maximized() && w > 200.0 && h > 200.0 {
+        s.set_window_size(w, h);
+    }
+    let _ = s.save();
+}
+
+/// Every quick-command group name (used to start with all groups collapsed, #55):
+/// "default" when any ungrouped command exists, plus explicit quick-groups and any
+/// group referenced by a command.
+fn all_quick_group_names(store: &ConfigStore) -> std::collections::HashSet<String> {
+    let cmds = store.quick_commands();
+    let mut set: std::collections::HashSet<String> = std::collections::HashSet::new();
+    if cmds.iter().any(|c| c.group.trim().is_empty()) {
+        set.insert("default".to_string());
+    }
+    for g in store.quick_groups() {
+        set.insert(g.clone());
+    }
+    for c in cmds {
+        let g = c.group.trim();
+        if !g.is_empty() {
+            set.insert(g.to_string());
+        }
+    }
+    set
 }
 
 /// Build the quick-command model for the command bar + manage dialog (#55).
-fn quick_cmd_model(store: &ConfigStore) -> ModelRc<QuickCmd> {
-    let rows: Vec<QuickCmd> = store
-        .quick_commands()
+///
+/// Grouped like the welcome session list: the implicit "default" group (entries
+/// with an empty group) comes first, then named groups alphabetically. Within a
+/// group, entries keep their saved order. `group_header` is set on the first row
+/// of each group; `collapsed` reflects `collapsed_groups` (runtime-only state);
+/// `orig_index` points back into the stored vec so deletes target the right entry
+/// even though the display order differs.
+fn quick_cmd_model(
+    store: &ConfigStore,
+    collapsed_groups: &std::collections::HashSet<String>,
+) -> ModelRc<QuickCmd> {
+    let cmds = store.quick_commands();
+
+    let has_default = cmds.iter().any(|c| c.group.trim().is_empty());
+    // Named groups = explicit quick-groups ∪ groups referenced by commands.
+    let mut named: Vec<String> = store
+        .quick_groups()
         .iter()
-        .map(|q| QuickCmd {
-            name: q.name.clone().into(),
-            command: q.command.clone().into(),
-        })
+        .cloned()
+        .chain(
+            cmds.iter()
+                .map(|c| c.group.trim().to_string())
+                .filter(|g| !g.is_empty()),
+        )
         .collect();
+    named.sort_by_key(|g| g.to_lowercase());
+    named.dedup();
+
+    let mut groups: Vec<String> = Vec::new();
+    if has_default {
+        groups.push("default".to_string());
+    }
+    groups.extend(named);
+
+    let mut rows: Vec<QuickCmd> = Vec::new();
+    for group in &groups {
+        let is_collapsed = collapsed_groups.contains(group);
+        let members: Vec<(usize, &crate::config::QuickCommand)> = cmds
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| {
+                let g = c.group.trim();
+                if group == "default" {
+                    g.is_empty()
+                } else {
+                    g == group
+                }
+            })
+            .collect();
+        if members.is_empty() {
+            // Header-only placeholder for an empty group (orig_index -1) so it can
+            // still be renamed / deleted, matching empty session folders.
+            rows.push(QuickCmd {
+                name: "".into(),
+                command: "".into(),
+                group: group.clone().into(),
+                group_header: group.clone().into(),
+                collapsed: is_collapsed,
+                orig_index: -1,
+            });
+        } else {
+            for (i, (orig_idx, c)) in members.iter().enumerate() {
+                rows.push(QuickCmd {
+                    name: c.name.clone().into(),
+                    command: c.command.clone().into(),
+                    group: group.clone().into(),
+                    group_header: if i == 0 { group.clone().into() } else { "".into() },
+                    collapsed: is_collapsed,
+                    orig_index: *orig_idx as i32,
+                });
+            }
+        }
+    }
     ModelRc::from(Rc::new(VecModel::from(rows)))
 }
 
@@ -2456,11 +2731,58 @@ fn forward_model(forwards: &[crate::config::PortForward]) -> ModelRc<PortFwd> {
             };
             PortFwd {
                 kind: f.kind.clone().into(),
+                name: f.name.clone().into(),
                 summary: summary.into(),
             }
         })
         .collect();
     ModelRc::from(Rc::new(VecModel::from(rows)))
+}
+
+/// Collect the full paths of the checked SFTP entries for a tab (#100).
+fn collect_sftp_selected(terminals: &VecModel<TerminalState>, tab_id: &str) -> Vec<String> {
+    let mut paths = Vec::new();
+    for ti in 0..terminals.row_count() {
+        let Some(row) = terminals.row_data(ti) else { continue };
+        if row.id.as_str() != tab_id {
+            continue;
+        }
+        if let Some(em) = row.sftp_entries.as_any().downcast_ref::<VecModel<SftpEntry>>() {
+            for ei in 0..em.row_count() {
+                if let Some(e) = em.row_data(ei) {
+                    if e.selected {
+                        paths.push(e.full_path.to_string());
+                    }
+                }
+            }
+        }
+        break;
+    }
+    paths
+}
+
+/// Uncheck every SFTP entry for a tab and reset its selected-count (#100).
+fn clear_sftp_selection(terminals: &VecModel<TerminalState>, tab_id: &str) {
+    for ti in 0..terminals.row_count() {
+        let Some(row) = terminals.row_data(ti) else { continue };
+        if row.id.as_str() != tab_id {
+            continue;
+        }
+        if let Some(em) = row.sftp_entries.as_any().downcast_ref::<VecModel<SftpEntry>>() {
+            for ei in 0..em.row_count() {
+                if let Some(mut e) = em.row_data(ei) {
+                    if e.selected {
+                        e.selected = false;
+                        em.set_row_data(ei, e);
+                    }
+                }
+            }
+        }
+        let mut r = row.clone();
+        r.sftp_selected_count = 0;
+        terminals.set_row_data(ti, r);
+        break;
+    }
 }
 
 /// Build the command-history model, newest first, for the ↑/↓ recall + the
@@ -2470,6 +2792,19 @@ fn history_model(store: &ConfigStore) -> ModelRc<SharedString> {
         .command_history()
         .iter()
         .rev()
+        .map(|s| s.clone().into())
+        .collect();
+    ModelRc::from(Rc::new(VecModel::from(rows)))
+}
+
+/// Build the filtered history dropdown model (#101).
+fn history_view_model(store: &ConfigStore, query: &str) -> ModelRc<SharedString> {
+    let q = query.trim().to_ascii_lowercase();
+    let rows: Vec<SharedString> = store
+        .command_history()
+        .iter()
+        .rev()
+        .filter(|s| q.is_empty() || s.to_ascii_lowercase().contains(&q))
         .map(|s| s.clone().into())
         .collect();
     ModelRc::from(Rc::new(VecModel::from(rows)))
@@ -2523,6 +2858,7 @@ fn rebuild_tab_display(win: &AppWindow, bufs: &TermBuffers, tab_id: &str) {
     let fm = ModelRc::from(Rc::new(VecModel::from(matches)));
     let sm = ModelRc::from(Rc::new(VecModel::from(sel)));
     let (cr, cc, ru, alt) = (b.cursor_row, b.cursor_col, b.rows_used, b.is_alt);
+    let (smax, soff) = (b.scroll_max, b.scroll_offset);
     set_terminal_row(win, tab_id, move |row| {
         row.spans = spans.clone();
         row.cursor_row = cr;
@@ -2531,6 +2867,8 @@ fn rebuild_tab_display(win: &AppWindow, bufs: &TermBuffers, tab_id: &str) {
         row.is_alt_screen = alt;
         row.find_matches = fm.clone();
         row.selection = sm.clone();
+        row.scroll_max = smax;
+        row.scroll_offset = soff;
     });
 }
 
@@ -2585,8 +2923,8 @@ fn refresh_sidebar(
         win.set_cpu_percent(snap.cpu_percent);
         win.set_mem_percent(snap.mem_percent);
         win.set_swap_percent(snap.swap_percent);
-        win.set_mem_detail(format_mem_mib(snap.mem_used_mib, snap.mem_total_mib).into());
-        win.set_swap_detail(format_mem_mib(snap.swap_used_mib, snap.swap_total_mib).into());
+        win.set_mem_detail(format_mem(snap.mem_used_mib, snap.mem_total_mib).into());
+        win.set_swap_detail(format_mem(snap.swap_used_mib, snap.swap_total_mib).into());
     };
     let clear_stats = |win: &AppWindow| {
         win.set_cpu_percent(0.0);
@@ -2596,10 +2934,22 @@ fn refresh_sidebar(
         win.set_swap_detail("".into());
     };
 
-    // Process monitor (#23) only applies to a live remote session; default to
-    // hidden/empty and let the connected branch below fill it in.
+    // Process monitor (#23) lives in a shared model (the AppWindow and the
+    // detachable ProcWindow point at the same VecModel), so mutate it in place
+    // instead of replacing it — replacing would break the sharing. Only a live
+    // remote session has process data; default to empty and let the connected
+    // branch below fill it in.
+    let set_procs = |win: &AppWindow, procs: &[ProcInfo]| {
+        if let Some(vm) = win
+            .get_proc_list()
+            .as_any()
+            .downcast_ref::<VecModel<ProcRow>>()
+        {
+            vm.set_vec(proc_rows(procs));
+        }
+    };
     win.set_proc_available(false);
-    win.set_proc_list(ModelRc::from(Rc::new(VecModel::<ProcRow>::default())));
+    set_procs(win, &[]);
 
     let active = win.get_active_tab_id().to_string();
     let status = if active == "welcome" {
@@ -2621,10 +2971,10 @@ fn refresh_sidebar(
             win.set_mem_percent(pct(st.mem_used_kib, st.mem_total_kib));
             win.set_swap_percent(pct(st.swap_used_kib, st.swap_total_kib));
             win.set_mem_detail(
-                format_mem_mib(st.mem_used_kib / 1024, st.mem_total_kib / 1024).into(),
+                format_mem(st.mem_used_kib / 1024, st.mem_total_kib / 1024).into(),
             );
             win.set_swap_detail(
-                format_mem_mib(st.swap_used_kib / 1024, st.swap_total_kib / 1024).into(),
+                format_mem(st.swap_used_kib / 1024, st.swap_total_kib / 1024).into(),
             );
             let (name, rx, tx) = selected_iface(&st);
             win.set_net_top_up(format_bytes_per_sec(tx).into());
@@ -2637,7 +2987,7 @@ fn refresh_sidebar(
             win.set_net_ifaces(ModelRc::from(Rc::new(VecModel::from(ifaces))));
             win.set_disks(disk_model(&st.disks));
             win.set_proc_available(true);
-            win.set_proc_list(proc_model(&st.procs));
+            set_procs(win, &st.procs);
         }
         // Disconnected / timed-out session.
         Some(st) if st.state == 2 => {
@@ -2747,6 +3097,7 @@ fn apply_session_event_to_window(
                     ModelRc::from(std::rc::Rc::new(VecModel::from(sel)));
                 let (cur_row, cur_col, rows_used, is_alt) =
                     (b.cursor_row, b.cursor_col, b.rows_used, b.is_alt);
+                let (smax, soff) = (b.scroll_max, b.scroll_offset);
                 update_terminal(&|t| {
                     t.spans = spans_model.clone();
                     t.cursor_row = cur_row;
@@ -2755,6 +3106,8 @@ fn apply_session_event_to_window(
                     t.is_alt_screen = is_alt;
                     t.find_matches = matches_model.clone();
                     t.selection = sel_model.clone();
+                    t.scroll_max = smax;
+                    t.scroll_offset = soff;
                 });
             }
         }
@@ -2850,6 +3203,7 @@ fn apply_session_event_to_window(
                     },
                     modified: format_mtime(e.modified).into(),
                     mode: (e.mode & 0o7777) as i32,
+                    selected: false,
                 })
                 .collect();
             let model = ModelRc::from(
@@ -2928,6 +3282,10 @@ fn apply_session_event_to_window(
                 // On error, show the actual message when we have one.
                 2 => if msg.is_empty() { t("失败", "Failed").to_string() } else { msg },
                 1 => t("已完成", "Done").to_string(),
+                // Remote-side prep (e.g. tar packing) before bytes start flowing (#100).
+                3 => t("文件准备中", "Preparing...").to_string(),
+                // User-cancelled transfer (#100).
+                4 => t("已取消", "Cancelled").to_string(),
                 _ => {
                     if total > 0 {
                         format!("{}/{}", format_size(transferred), format_size(total))
@@ -2971,22 +3329,22 @@ fn apply_session_event_to_window(
                 }
             }
         }
-        SessionEvent::HostKeyVerify { host, key_type, fingerprint, key_changed, response } => {
+        SessionEvent::HostKeyPrompt { host, port: _, key_type, fingerprint, changed, responder } => {
             // 设置主机密钥验证对话框
             win.set_host_key_host(host.into());
             win.set_host_key_type(key_type.into());
             win.set_host_key_fingerprint(fingerprint.into());
-            win.set_host_key_changed(key_changed);
+            win.set_host_key_changed(changed);
             win.set_host_key_open(true);
-            // 从 Arc<Mutex<Option<Sender>>> 中提取 Sender，保存到全局变量
-            if let Ok(mut resp_guard) = response.lock() {
-                if let Some(tx) = resp_guard.take() {
-                    if let Ok(mut guard) = HOST_KEY_RESPONSE.lock() {
-                        *guard = Some(tx);
-                    }
-                }
+            // 保存响应器，等待用户在对话框中确认或拒绝
+            if let Ok(mut guard) = HOST_KEY_RESPONSE.lock() {
+                *guard = Some(responder);
             }
         }
+        // Upstream variants not yet wired in rusterm.
+        SessionEvent::CredentialPrompt { .. }
+        | SessionEvent::CommandRan(_)
+        | SessionEvent::SftpError(_) => {}
     }
 }
 
@@ -3293,6 +3651,38 @@ fn wire_sftp_callbacks(
         window.on_sftp_download(move |tab_id: SharedString, remote_path: SharedString| {
             let tab_id = tab_id.to_string();
             let remote_path = remote_path.to_string();
+            // If the user has checked 2+ entries, ANY download (right-click,
+            // row button or the toolbar) packs the whole checked set into one
+            // archive (#100) — this matches "download these together". A single
+            // checked item (or none) downloads the clicked file as-is.
+            let (arc_dir, arc_names) = weak
+                .upgrade()
+                .and_then(|w| {
+                    let terminals = w.get_terminals();
+                    let tm = terminals
+                        .as_any()
+                        .downcast_ref::<VecModel<TerminalState>>()?;
+                    let paths = collect_sftp_selected(tm, &tab_id);
+                    if paths.len() >= 2 {
+                        let dir = active_sftp_path(&w, &tab_id);
+                        let names: Vec<String> = paths
+                            .iter()
+                            .map(|p| {
+                                p.trim_end_matches('/')
+                                    .rsplit(['/', '\\'])
+                                    .next()
+                                    .unwrap_or(p)
+                                    .to_string()
+                            })
+                            .collect();
+                        clear_sftp_selection(tm, &tab_id);
+                        Some((dir, names))
+                    } else {
+                        None
+                    }
+                })
+                .map(|(d, n)| (Some(d), n))
+                .unwrap_or((None, Vec::new()));
             // "Always ask" (#87) forces the folder picker, ignoring the preset.
             let (preset, always_ask) = weak
                 .upgrade()
@@ -3306,7 +3696,11 @@ fn wire_sftp_callbacks(
             if !always_ask && !preset.is_empty() {
                 if let Ok(handles) = sftp_handles.lock() {
                     if let Some(h) = handles.get(&tab_id) {
-                        h.download(remote_path, preset);
+                        if let Some(ref dir) = arc_dir {
+                            h.download_archive(dir.clone(), arc_names.clone(), preset);
+                        } else {
+                            h.download(remote_path, preset);
+                        }
                         // Pop the transfers panel so progress is visible (user
                         // request: any download opens the download popup).
                         if let Some(w) = weak.upgrade() {
@@ -3323,7 +3717,11 @@ fn wire_sftp_callbacks(
                     let local_dir = dir.to_string_lossy().to_string();
                     if let Ok(handles) = sftp_handles.lock() {
                         if let Some(h) = handles.get(&tab_id) {
-                            h.download(remote_path, local_dir);
+                            if let Some(ref rdir) = arc_dir {
+                                h.download_archive(rdir.clone(), arc_names.clone(), local_dir);
+                            } else {
+                                h.download(remote_path, local_dir);
+                            }
                         }
                     }
                     let _ = weak.upgrade_in_event_loop(|w| w.set_download_open(true));
@@ -3418,6 +3816,130 @@ fn wire_sftp_callbacks(
                     h.delete(path.to_string());
                 }
             }
+        });
+    }
+
+    // SFTP multi-select: toggle a row's checkbox + recount (#100).
+    {
+        let weak = window.as_weak();
+        window.on_sftp_toggle_select(move |tab_id: SharedString, idx: i32| {
+            let Some(w) = weak.upgrade() else { return };
+            let terminals = w.get_terminals();
+            let Some(tm) = terminals.as_any().downcast_ref::<VecModel<TerminalState>>() else {
+                return;
+            };
+            for ti in 0..tm.row_count() {
+                let Some(row) = tm.row_data(ti) else { continue };
+                if row.id.as_str() != tab_id.as_str() {
+                    continue;
+                }
+                if let Some(em) = row.sftp_entries.as_any().downcast_ref::<VecModel<SftpEntry>>() {
+                    let i = idx as usize;
+                    if let Some(mut e) = em.row_data(i) {
+                        e.selected = !e.selected;
+                        em.set_row_data(i, e);
+                    }
+                    let mut n = 0;
+                    for ei in 0..em.row_count() {
+                        if em.row_data(ei).map(|x| x.selected).unwrap_or(false) {
+                            n += 1;
+                        }
+                    }
+                    let mut r = row.clone();
+                    r.sftp_selected_count = n;
+                    tm.set_row_data(ti, r);
+                }
+                break;
+            }
+        });
+    }
+    // SFTP multi-select: download all checked entries into one folder (#100).
+    {
+        let sftp_handles = sftp_handles.clone();
+        let weak = window.as_weak();
+        window.on_sftp_download_selected(move |tab_id: SharedString| {
+            let Some(w) = weak.upgrade() else { return };
+            let terminals = w.get_terminals();
+            let Some(tm) = terminals.as_any().downcast_ref::<VecModel<TerminalState>>() else {
+                return;
+            };
+            let paths = collect_sftp_selected(tm, tab_id.as_str());
+            if paths.is_empty() {
+                return;
+            }
+            // Single selection downloads as a plain file (no compression, #100.3);
+            // multiple selections are tar-packed into one archive on the remote
+            // (#100.2) — this also avoids the concurrent-transfer races (#100.1).
+            let single = paths.len() == 1;
+            let remote_dir = active_sftp_path(&w, tab_id.as_str());
+            let names: Vec<String> = paths
+                .iter()
+                .map(|p| {
+                    p.trim_end_matches('/')
+                        .rsplit(['/', '\\'])
+                        .next()
+                        .unwrap_or(p)
+                        .to_string()
+                })
+                .collect();
+            let preset = w.get_download_dir().to_string();
+            let always_ask = w.get_download_always_ask();
+            if !always_ask && !preset.is_empty() {
+                if let Ok(handles) = sftp_handles.lock() {
+                    if let Some(h) = handles.get(tab_id.as_str()) {
+                        if single {
+                            h.download(paths[0].clone(), preset.clone());
+                        } else {
+                            h.download_archive(remote_dir.clone(), names.clone(), preset.clone());
+                        }
+                    }
+                }
+                w.set_download_open(true);
+            } else {
+                let sftp_handles = sftp_handles.clone();
+                let weak2 = weak.clone();
+                let tab = tab_id.to_string();
+                std::thread::spawn(move || {
+                    if let Some(dir) = rfd::FileDialog::new().pick_folder() {
+                        let dir = dir.to_string_lossy().to_string();
+                        if let Ok(handles) = sftp_handles.lock() {
+                            if let Some(h) = handles.get(&tab) {
+                                if single {
+                                    h.download(paths[0].clone(), dir.clone());
+                                } else {
+                                    h.download_archive(remote_dir.clone(), names.clone(), dir.clone());
+                                }
+                            }
+                        }
+                        let _ = weak2.upgrade_in_event_loop(|w| w.set_download_open(true));
+                    }
+                });
+            }
+            clear_sftp_selection(tm, tab_id.as_str());
+        });
+    }
+    // SFTP multi-select: delete all checked entries (confirmed in the UI) (#100).
+    {
+        let sftp_handles = sftp_handles.clone();
+        let weak = window.as_weak();
+        window.on_sftp_delete_selected(move |tab_id: SharedString| {
+            let Some(w) = weak.upgrade() else { return };
+            let terminals = w.get_terminals();
+            let Some(tm) = terminals.as_any().downcast_ref::<VecModel<TerminalState>>() else {
+                return;
+            };
+            let paths = collect_sftp_selected(tm, tab_id.as_str());
+            if paths.is_empty() {
+                return;
+            }
+            if let Ok(handles) = sftp_handles.lock() {
+                if let Some(h) = handles.get(tab_id.as_str()) {
+                    for p in &paths {
+                        h.delete(p.clone());
+                    }
+                }
+            }
+            clear_sftp_selection(tm, tab_id.as_str());
         });
     }
 
@@ -3694,30 +4216,79 @@ fn wire_key_input(
             }
         });
     }
+    // History search (#101): filter the dropdown by a case-insensitive substring.
+    // The current query is shared so a delete from a filtered view re-filters.
+    let hist_query: Rc<RefCell<String>> = Rc::new(RefCell::new(String::new()));
     {
         let store_rc = store.clone();
         let weak = window.as_weak();
-        window.on_add_quick_command(move |name: SharedString, command: SharedString| {
-            let name = name.trim().to_string();
-            let command = command.to_string();
-            if name.is_empty() || command.trim().is_empty() {
-                return;
-            }
-            {
-                let mut s = store_rc.borrow_mut();
-                let mut v = s.quick_commands().to_vec();
-                v.push(crate::config::QuickCommand { name, command });
-                s.set_quick_commands(v);
-                let _ = s.save();
-            }
+        let hist_query = hist_query.clone();
+        window.on_search_history(move |query: SharedString| {
+            *hist_query.borrow_mut() = query.to_string();
             if let Some(w) = weak.upgrade() {
-                w.set_quick_commands(quick_cmd_model(&store_rc.borrow()));
+                w.set_history_view(history_view_model(&store_rc.borrow(), &query));
             }
         });
+    }
+    // Delete a history entry by its command text (#101) — index-free so it works
+    // from the filtered dropdown view.
+    {
+        let store_rc = store.clone();
+        let weak = window.as_weak();
+        let hist_query = hist_query.clone();
+        window.on_delete_history_cmd(move |cmd: SharedString| {
+            {
+                let mut s = store_rc.borrow_mut();
+                if let Some(idx) = s.command_history().iter().position(|c| c == cmd.as_str()) {
+                    s.remove_command_history(idx);
+                    let _ = s.save();
+                }
+            }
+            if let Some(w) = weak.upgrade() {
+                let s = store_rc.borrow();
+                w.set_command_history(history_model(&s));
+                w.set_history_view(history_view_model(&s, &hist_query.borrow()));
+            }
+        });
+    }
+    // Runtime-only collapse state for quick-command groups (#55) — like the
+    // welcome session groups, this is not persisted across restarts. Starts with
+    // every group collapsed (default-collapsed view).
+    let collapsed_quick_groups: Rc<RefCell<std::collections::HashSet<String>>> =
+        Rc::new(RefCell::new(all_quick_group_names(&store.borrow())));
+    {
+        let store_rc = store.clone();
+        let weak = window.as_weak();
+        let collapsed = collapsed_quick_groups.clone();
+        window.on_add_quick_command(
+            move |name: SharedString, command: SharedString, group: SharedString| {
+                let name = name.trim().to_string();
+                let command = command.to_string();
+                let group = group.trim().to_string();
+                if name.is_empty() || command.trim().is_empty() {
+                    return;
+                }
+                {
+                    let mut s = store_rc.borrow_mut();
+                    let mut v = s.quick_commands().to_vec();
+                    v.push(crate::config::QuickCommand {
+                        name,
+                        command,
+                        group,
+                    });
+                    s.set_quick_commands(v);
+                    let _ = s.save();
+                }
+                if let Some(w) = weak.upgrade() {
+                    w.set_quick_commands(quick_cmd_model(&store_rc.borrow(), &collapsed.borrow()));
+                }
+            },
+        );
     }
     {
         let store_rc = store.clone();
         let weak = window.as_weak();
+        let collapsed = collapsed_quick_groups.clone();
         window.on_delete_quick_command(move |index: i32| {
             {
                 let mut s = store_rc.borrow_mut();
@@ -3730,7 +4301,154 @@ fn wire_key_input(
                 let _ = s.save();
             }
             if let Some(w) = weak.upgrade() {
-                w.set_quick_commands(quick_cmd_model(&store_rc.borrow()));
+                w.set_quick_commands(quick_cmd_model(&store_rc.borrow(), &collapsed.borrow()));
+            }
+        });
+    }
+    {
+        let store_rc = store.clone();
+        let weak = window.as_weak();
+        let collapsed = collapsed_quick_groups.clone();
+        window.on_toggle_quick_group(move |group: SharedString| {
+            let g = group.to_string();
+            {
+                let mut set = collapsed.borrow_mut();
+                if !set.remove(&g) {
+                    set.insert(g);
+                }
+            }
+            if let Some(w) = weak.upgrade() {
+                w.set_quick_commands(quick_cmd_model(&store_rc.borrow(), &collapsed.borrow()));
+            }
+        });
+    }
+    // Edit (#55): load the entry into the manage form in edit mode.
+    {
+        let store_rc = store.clone();
+        let weak = window.as_weak();
+        window.on_edit_quick_command(move |index: i32| {
+            let i = index as usize;
+            let cmd = store_rc.borrow().quick_commands().get(i).cloned();
+            if let (Some(c), Some(w)) = (cmd, weak.upgrade()) {
+                w.set_qcm_name(c.name.into());
+                w.set_qcm_command(c.command.into());
+                w.set_qcm_group(c.group.into());
+                w.set_qcm_edit_index(index);
+                w.set_quick_cmd_manage_open(true);
+            }
+        });
+    }
+    // Save an edited entry (#55).
+    {
+        let store_rc = store.clone();
+        let weak = window.as_weak();
+        let collapsed = collapsed_quick_groups.clone();
+        window.on_save_quick_command(
+            move |index: i32, name: SharedString, command: SharedString, group: SharedString| {
+                let name = name.trim().to_string();
+                let command = command.to_string();
+                let group = group.trim().to_string();
+                if name.is_empty() || command.trim().is_empty() {
+                    return;
+                }
+                {
+                    let mut s = store_rc.borrow_mut();
+                    s.update_quick_command(
+                        index as usize,
+                        crate::config::QuickCommand {
+                            name,
+                            command,
+                            group,
+                        },
+                    );
+                    let _ = s.save();
+                }
+                if let Some(w) = weak.upgrade() {
+                    w.set_quick_commands(quick_cmd_model(&store_rc.borrow(), &collapsed.borrow()));
+                }
+            },
+        );
+    }
+    // Duplicate (#55): clone the entry as a starting point.
+    {
+        let store_rc = store.clone();
+        let weak = window.as_weak();
+        let collapsed = collapsed_quick_groups.clone();
+        window.on_duplicate_quick_command(move |index: i32| {
+            {
+                let mut s = store_rc.borrow_mut();
+                let mut v = s.quick_commands().to_vec();
+                if let Some(c) = v.get(index as usize).cloned() {
+                    let dup = crate::config::QuickCommand {
+                        name: format!("{} (copy)", c.name),
+                        command: c.command,
+                        group: c.group,
+                    };
+                    v.insert(index as usize + 1, dup);
+                    s.set_quick_commands(v);
+                    let _ = s.save();
+                }
+            }
+            if let Some(w) = weak.upgrade() {
+                w.set_quick_commands(quick_cmd_model(&store_rc.borrow(), &collapsed.borrow()));
+            }
+        });
+    }
+    // Move to a group (#55): "default" maps to the empty (ungrouped) group.
+    {
+        let store_rc = store.clone();
+        let weak = window.as_weak();
+        let collapsed = collapsed_quick_groups.clone();
+        window.on_move_quick_command(move |index: i32, group: SharedString| {
+            let target = group.to_string();
+            let target = if target == "default" { String::new() } else { target };
+            {
+                let mut s = store_rc.borrow_mut();
+                let mut v = s.quick_commands().to_vec();
+                if let Some(c) = v.get_mut(index as usize) {
+                    c.group = target;
+                }
+                s.set_quick_commands(v);
+                let _ = s.save();
+            }
+            if let Some(w) = weak.upgrade() {
+                w.set_quick_commands(quick_cmd_model(&store_rc.borrow(), &collapsed.borrow()));
+            }
+        });
+    }
+    // Quick-group create / rename (#55).
+    {
+        let store_rc = store.clone();
+        let weak = window.as_weak();
+        let collapsed = collapsed_quick_groups.clone();
+        window.on_submit_quick_group(move |orig: SharedString, name: SharedString| {
+            {
+                let mut s = store_rc.borrow_mut();
+                if orig.is_empty() {
+                    s.add_quick_group(name.to_string());
+                } else {
+                    s.rename_quick_group(&orig.to_string(), name.to_string());
+                }
+                let _ = s.save();
+            }
+            if let Some(w) = weak.upgrade() {
+                w.set_quick_commands(quick_cmd_model(&store_rc.borrow(), &collapsed.borrow()));
+            }
+        });
+    }
+    // Quick-group delete (#55) — UI only offers this on empty groups.
+    {
+        let store_rc = store.clone();
+        let weak = window.as_weak();
+        let collapsed = collapsed_quick_groups.clone();
+        window.on_delete_quick_group(move |name: SharedString| {
+            {
+                let mut s = store_rc.borrow_mut();
+                s.remove_quick_group(&name.to_string());
+                let _ = s.save();
+            }
+            if let Some(w) = weak.upgrade() {
+                w.set_quick_commands(quick_cmd_model(&store_rc.borrow(), &collapsed.borrow()));
             }
         });
     }
@@ -4170,6 +4888,8 @@ fn wire_key_input(
                     row.cursor_row = 0;
                     row.cursor_col = 0;
                     row.rows_used = 0;
+                    row.scroll_max = 0;
+                    row.scroll_offset = 0;
                 });
             }
             if let Some(h) = handles_clear.borrow().get(&tid) {
@@ -4217,6 +4937,24 @@ fn wire_key_input(
                 let max_off = buf.history.len() as i64;
                 let cur = buf.view_offset as i64;
                 buf.view_offset = (cur + delta as i64).clamp(0, max_off) as usize;
+            }
+            if let Some(win) = weak.upgrade() {
+                rebuild_tab_display(&win, &bufs_scroll, &tid);
+            }
+        });
+    }
+
+    // Scrollbar drag → jump to an absolute scrollback offset (#103).
+    {
+        let bufs_scroll = bufs.clone();
+        let weak = window.as_weak();
+        window.on_terminal_scroll_to(move |tab_id: SharedString, offset: i32| {
+            let tid = tab_id.to_string();
+            {
+                let mut map = bufs_scroll.lock().unwrap();
+                let Some(buf) = map.get_mut(&tid) else { return };
+                let max_off = buf.history.len() as i64;
+                buf.view_offset = (offset as i64).clamp(0, max_off) as usize;
             }
             if let Some(win) = weak.upgrade() {
                 rebuild_tab_display(&win, &bufs_scroll, &tid);
@@ -4568,6 +5306,89 @@ fn clipboard_set_text(text: String) {
 
 /// Enumerate installed monospace font families for the Interface font picker.
 /// Terminals want fixed-width fonts, so non-monospace families are filtered out.
+/// Choose a UI font family that fontdb can actually resolve, falling back to the
+/// embedded "Meatshell Mono" when the system font database is empty/unreadable.
+///
+/// macOS 26 (Tahoe) shipped a system where fontdb couldn't register the named
+/// CJK font ("PingFang SC"), so hard-coding that name made the whole UI render
+/// blank (#129). This probes the loaded faces and picks the first CJK-capable
+/// family that exists; if none do, it returns the embedded font so the window is
+/// still visible (Latin text shows; CJK may tofu — far better than a blank UI).
+///
+/// Emits a one-line WARN summary (faces loaded + chosen font) so the choice lands
+/// in `error.log` for diagnostics without needing RUST_LOG.
+fn resolve_ui_font_family() -> slint::SharedString {
+    use fontdb::{Database, Family, Query, Stretch, Style, Weight};
+
+    // Diagnostic / escape hatch (#129): force a specific UI font without a rebuild.
+    // e.g. MEATSHELL_UI_FONT="Meatshell Mono" to test whether the embedded font
+    // renders when system fonts don't. Empty value is ignored.
+    if let Some(f) = std::env::var_os("MEATSHELL_UI_FONT") {
+        let f = f.to_string_lossy().into_owned();
+        if !f.trim().is_empty() {
+            tracing::debug!(font = %f, "ui-font: overridden via MEATSHELL_UI_FONT");
+            return f.into();
+        }
+    }
+
+    let mut db = Database::new();
+    db.load_system_fonts();
+    let face_count = db.faces().count();
+
+    // CJK-capable system families, most-preferred first, per platform. The UI
+    // default font must cover CJK because TextInput doesn't glyph-fallback (#54).
+    //
+    // macOS note (#129): the modern system CJK fonts (PingFang SC, Hiragino) fail
+    // to rasterize under femtovg on some macOS 26 machines — fontdb finds them but
+    // every glyph comes out blank. The older Heiti/Songti faces render fine and
+    // ship on every macOS, so we prefer them and keep PingFang only as a late
+    // fallback. (Verified on an M2/macOS 26: Heiti SC/STHeiti/Songti SC render,
+    // PingFang/Hiragino don't.) Power users can still force one via
+    // MEATSHELL_UI_FONT. Heiti SC is a clean sans-serif (better for UI than the
+    // serif Songti), so it leads.
+    #[cfg(target_os = "macos")]
+    let candidates: &[&str] = &[
+        "Heiti SC", "STHeiti", "Songti SC", "PingFang SC", "Hiragino Sans GB",
+    ];
+    #[cfg(target_os = "windows")]
+    let candidates: &[&str] = &["Microsoft YaHei UI", "Microsoft YaHei", "SimHei", "SimSun"];
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    let candidates: &[&str] = &[
+        "Noto Sans CJK SC", "Noto Sans CJK", "Source Han Sans SC",
+        "WenQuanYi Micro Hei", "Droid Sans Fallback",
+    ];
+
+    for name in candidates {
+        let q = Query {
+            families: &[Family::Name(name)],
+            weight: Weight::NORMAL,
+            stretch: Stretch::Normal,
+            style: Style::Normal,
+        };
+        if db.query(&q).is_some() {
+            tracing::debug!(faces = face_count, font = name, "ui-font: using system CJK font");
+            return (*name).into();
+        }
+    }
+
+    // No preferred family resolved. List what *is* available (if anything) so the
+    // log shows whether enumeration is empty or just missing our candidates (#129).
+    if face_count > 0 {
+        let mut fams: Vec<String> = db
+            .faces()
+            .filter_map(|f| f.families.first().map(|(n, _)| n.clone()))
+            .collect();
+        fams.sort();
+        fams.dedup();
+        let sample: Vec<String> = fams.into_iter().take(40).collect();
+        tracing::warn!(faces = face_count, available = ?sample,
+            "ui-font: no preferred CJK font resolved; listing available families");
+    }
+    tracing::warn!(faces = face_count,
+        "ui-font: falling back to embedded 'Meatshell Mono' (system fonts unusable, #129)");
+    "Meatshell Mono".into()
+}
+
 fn system_monospace_fonts() -> Vec<slint::SharedString> {
     let mut db = fontdb::Database::new();
     db.load_system_fonts();
@@ -4817,6 +5638,10 @@ struct BuiltScreen {
     cursor_col: i32,
     rows_used: i32,
     is_alt: bool,
+    /// Scrollback depth (max view_offset = history length) and the current
+    /// offset (0 = live bottom), for the terminal scrollbar (#103).
+    scroll_max: i32,
+    scroll_offset: i32,
 }
 
 /// One coloured run within a line (its grid row is assigned at render time).
@@ -5255,6 +6080,8 @@ impl TermBuffer {
                 cursor_col: cur_col as i32,
                 rows_used,
                 is_alt,
+                scroll_max: if is_alt { 0 } else { self.history.len() as i32 },
+                scroll_offset: 0,
             };
         }
 
@@ -5306,6 +6133,8 @@ impl TermBuffer {
             cursor_col: 0,
             rows_used: win as i32,
             is_alt: false,
+            scroll_max: self.history.len() as i32,
+            scroll_offset: self.view_offset as i32,
         }
     }
 }

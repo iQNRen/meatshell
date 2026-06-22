@@ -43,17 +43,22 @@ export global Theme {
     out property <brush> term-fg: dark ? #d4d4d4 : #2d2d2f;
 
     // 自定义终端背景（Rust 侧设置，Slint 直接使用）
-    in property <brush> term-bg-override: transparent;  // 自定义背景色（transparent = 用默认）
-    in property <image> term-bg-image-src;               // 背景图片（Rust 加载后传入）
-    in property <float> term-bg-opacity: 0.3;            // 背景图透明度
-    in property <brush> term-fg-override: transparent;   // 自定义字体颜色（transparent = 用默认）
+    in-out property <brush> term-bg-override: transparent;  // 自定义背景色（transparent = 用默认）
+    in-out property <image> term-bg-image-src;               // 背景图片（Rust 加载后传入）
+    in-out property <float> term-bg-opacity: 0.3;            // 背景图透明度
+    in-out property <brush> term-fg-override: transparent;   // 自定义字体颜色（transparent = 用默认）
+
+    // Global UI scale (#100/#117/#118). Rust sets this from the saved setting;
+    // all font sizes and spacing/radii below multiply by it, so the whole UI
+    // grows/shrinks live (the terminal font has its own size setting).
+    in-out property <float> ui-scale: 1.0;
 
     // --- Typography --------------------------------------------------------
-    out property <length> fs-xs: 11px;
-    out property <length> fs-sm: 12px;
-    out property <length> fs-md: 13px;
-    out property <length> fs-lg: 15px;
-    out property <length> fs-xl: 18px;
+    out property <length> fs-xs: 11px * root.ui-scale;
+    out property <length> fs-sm: 12px * root.ui-scale;
+    out property <length> fs-md: 13px * root.ui-scale;
+    out property <length> fs-lg: 15px * root.ui-scale;
+    out property <length> fs-xl: 18px * root.ui-scale;
 
     // Embedded glyph-complete monospace (Cascadia Mono under a unique name, #114).
     out property <string> font-mono: "Meatshell Mono";
@@ -70,12 +75,12 @@ export global Theme {
     in-out property <length> term-font-size: 13px;
 
     // --- Geometry ----------------------------------------------------------
-    out property <length> radius-sm: 4px;
-    out property <length> radius-md: 6px;
-    out property <length> radius-lg: 10px;
+    out property <length> radius-sm: 4px * root.ui-scale;
+    out property <length> radius-md: 6px * root.ui-scale;
+    out property <length> radius-lg: 10px * root.ui-scale;
 
-    out property <length> gap-xs: 4px;
-    out property <length> gap-sm: 8px;
-    out property <length> gap-md: 12px;
-    out property <length> gap-lg: 16px;
+    out property <length> gap-xs: 4px * root.ui-scale;
+    out property <length> gap-sm: 8px * root.ui-scale;
+    out property <length> gap-md: 12px * root.ui-scale;
+    out property <length> gap-lg: 16px * root.ui-scale;
 }

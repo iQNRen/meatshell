@@ -12,6 +12,7 @@ export struct SftpEntry {
     size: string,
     modified: string,
     mode: int,        // POSIX permission bits, for the chmod dialog (#84)
+    selected: bool,   // multi-select checkbox state (#100)
 }
 
 export struct SftpTreeNode {
@@ -57,7 +58,20 @@ export component SftpPanel inherits Rectangle {
     in property <bool>    loading: false;
     in property <[SftpTreeNode]> tree-nodes: [];
     in property <bool> collapsed: false;   // when true only the toolbar shows
+    in property <bool> show-tree: true;    // hide the directory tree when narrow (#dock)
+    in property <bool> compact: false;     // side-docked + collapsed → render nothing but a clean strip (#dock)
+    // Responsive columns: only when docked left/right (narrow, width-adjustable).
+    // Docked top/bottom the panel is wide and can only be resized vertically, so
+    // always show every column there (show-tree is true exactly in that case).
+    // When narrow, drop Size then Modified the moment keeping them would squeeze
+    // the Name column below `name-min` (names start eliding to "…"). Reserved
+    // widths: checkbox+padding+spacing 36px, Size col 76px, Modified 120px.
+    property <length> list-w: root.show-tree ? root.width - 161px : root.width;
+    property <length> name-min: 180px;     // narrower than this → start dropping columns
+    property <bool> show-size-col: root.show-tree || (root.list-w - 36px - 76px - 120px > root.name-min);
+    property <bool> show-modified-col: root.show-tree || (root.list-w - 36px - 120px > root.name-min);
     property <int> selected-row: -1;       // clicked/highlighted file-list row (#70)
+    in property <int> selected-count;      // number of checked entries (#100)
     // Panel-level right-click context menu (#84). One menu for the whole list:
     // an empty `menu-target` means the click landed on whitespace, which greys
     // out the item-specific actions (download/rename/…) but keeps new/refresh.
@@ -76,6 +90,9 @@ export component SftpPanel inherits Rectangle {
     callback refresh(string);
     callback tree-expand(string);   // toggle expand/collapse + navigate
     callback delete(string);        // remove a remote file/dir
+    callback toggle-select(int);    // toggle a row's multi-select checkbox (#100)
+    callback download-selected();   // download all checked entries (#100)
+    callback delete-selected();     // delete all checked entries (#100)
     callback view(string);          // open read-only in the built-in viewer
     callback edit(string);          // open writable in the built-in editor
     callback open-external(string);     // open with the OS default app (#81)
@@ -87,6 +104,10 @@ export component SftpPanel inherits Rectangle {
     callback copy-path(string);
     callback new-folder(string /* parent dir */);
     callback new-file(string /* parent dir */);
+    // Drag-to-dock: empty areas of the panel are a grab handle; coordinates are
+    // reported in window space so the parent can compute the target edge (#dock).
+    callback dock-drag-move(length /* abs-x */, length /* abs-y */);
+    callback dock-drag-end();
 
     // -----------------------------------------------------------------------
     background: Theme.bg-panel;
@@ -95,7 +116,25 @@ export component SftpPanel inherits Rectangle {
     // (tree click, file double-click, terminal cd) (#54).
     changed current-path => { path-input.text = root.current-path; root.selected-row = -1; }
 
+    // Drag empty space to re-dock; interactive widgets (file list, tree, toolbar
+    // buttons) sit in front and capture their own events (#dock).
+    dock-bg := TouchArea {
+        mouse-cursor: move;
+        moved => {
+            root.dock-drag-move(self.absolute-position.x + self.mouse-x,
+                                self.absolute-position.y + self.mouse-y);
+        }
+        pointer-event(ev) => {
+            if (ev.kind == PointerEventKind.up) { root.dock-drag-end(); }
+        }
+    }
+
+    // Hidden entirely when side-docked + collapsed: the horizontal toolbar would
+    // otherwise squish into an unusable vertical strip. `visible` (not `if`) so
+    // ids like path-input stay accessible to handlers. The parent floats a clean
+    // expand button over this (#dock).
     VerticalLayout {
+        visible: !root.compact;
         spacing: 0;
 
         // --- Toolbar (full width) ------------------------------------------
@@ -107,6 +146,35 @@ export component SftpPanel inherits Rectangle {
                 padding-left: 6px;
                 padding-right: 6px;
                 spacing: 4px;
+
+                // Dedicated drag handle to re-dock the panel. The toolbar is full
+                // of controls, so dragging "empty space" is unreliable; this grip
+                // is always grabbable and reports window-space coords (#dock).
+                Rectangle {
+                    width: 16px;
+                    y: (parent.height - self.height) / 2;
+                    height: 22px;
+                    grip-ta := TouchArea {
+                        mouse-cursor: move;
+                        moved => {
+                            root.dock-drag-move(self.absolute-position.x + self.mouse-x,
+                                                self.absolute-position.y + self.mouse-y);
+                        }
+                        pointer-event(ev) => {
+                            if (ev.kind == PointerEventKind.up) { root.dock-drag-end(); }
+                        }
+                    }
+                    Text {
+                        text: "\u{E945}";   // drag_indicator
+                        font-family: "Material Icons";
+                        color: grip-ta.has-hover ? Theme.text-secondary : Theme.text-muted;
+                        font-size: 16px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                        width: parent.width;
+                        height: parent.height;
+                    }
+                }
 
                 // Editable path bar: type or paste a path and press Enter to
                 // jump there; copy / paste-jump buttons sit right after it (#54).
@@ -219,6 +287,30 @@ export component SftpPanel inherits Rectangle {
                     }
                 }
 
+                // Batch actions on checked entries — only when something's checked (#100).
+                if root.selected-count > 0 : Text {
+                    text: "✓" + root.selected-count;
+                    color: Theme.accent;
+                    font-size: Theme.fs-sm;
+                    vertical-alignment: center;
+                }
+                if root.selected-count > 0 : Rectangle {
+                    width: 24px; height: 22px;
+                    border-radius: Theme.radius-sm;
+                    background: dls-ta.has-hover ? Theme.bg-hover : transparent;
+                    dls-ta := TouchArea { mouse-cursor: pointer; clicked => { root.download-selected(); } }
+                    Text { text: "\u{E2C4}"; font-family: "Material Icons"; color: Theme.text-secondary;
+                           font-size: Theme.fs-md; horizontal-alignment: center; vertical-alignment: center; }
+                }
+                if root.selected-count > 0 : Rectangle {
+                    width: 24px; height: 22px;
+                    border-radius: Theme.radius-sm;
+                    background: dels-ta.has-hover ? Theme.danger.with-alpha(0.18) : transparent;
+                    dels-ta := TouchArea { mouse-cursor: pointer; clicked => { root.delete-selected(); } }
+                    Text { text: "\u{E872}"; font-family: "Material Icons"; color: Theme.danger;
+                           font-size: Theme.fs-md; horizontal-alignment: center; vertical-alignment: center; }
+                }
+
                 Rectangle {
                     width: 24px; height: 22px;
                     border-radius: Theme.radius-sm;
@@ -254,8 +346,8 @@ export component SftpPanel inherits Rectangle {
             vertical-stretch: 1;
             spacing: 0;
 
-            // ── Left: directory tree ────────────────────────────────────────
-            VerticalLayout {
+            // ── Left: directory tree (hidden when the panel is narrow) ──────
+            if root.show-tree : VerticalLayout {
                 width: 160px;
                 spacing: 0;
 
@@ -330,8 +422,8 @@ export component SftpPanel inherits Rectangle {
                 }
             }
 
-            // Vertical separator
-            Rectangle { width: 1px; background: Theme.border-subtle; }
+            // Vertical separator (only when the tree is shown)
+            if root.show-tree : Rectangle { width: 1px; background: Theme.border-subtle; }
 
             // ── Right: file listing ─────────────────────────────────────────
             VerticalLayout {
@@ -343,12 +435,15 @@ export component SftpPanel inherits Rectangle {
                     height: 20px;
                     background: Theme.bg-root;
                     HorizontalLayout {
-                        padding-left: 8px; padding-right: 8px;
+                        padding-left: 8px; padding-right: 8px; spacing: 8px;
+                        // Spacer matching the rows' checkbox so the header columns
+                        // line up with the values below them (#dock).
+                        Rectangle { width: 16px; }
                         Text { text: @tr("Name"); color: Theme.text-muted; font-size: Theme.fs-xs;
                                horizontal-stretch: 1; vertical-alignment: center; }
-                        Text { text: @tr("Size"); color: Theme.text-muted; font-size: Theme.fs-xs;
+                        if root.show-size-col : Text { text: @tr("Size"); color: Theme.text-muted; font-size: Theme.fs-xs;
                                width: 72px; horizontal-alignment: right; vertical-alignment: center; }
-                        Text { text: @tr("Modified"); color: Theme.text-muted; font-size: Theme.fs-xs;
+                        if root.show-modified-col : Text { text: @tr("Modified"); color: Theme.text-muted; font-size: Theme.fs-xs;
                                width: 116px; horizontal-alignment: right; vertical-alignment: center; }
                     }
                 }
@@ -383,11 +478,13 @@ export component SftpPanel inherits Rectangle {
 
                             for entry[i] in root.entries : row := Rectangle {
                                 height: 24px;
-                                background: i == root.selected-row
-                                    ? #4a90e240
-                                    : (row-ta.has-hover
-                                        ? #4a90e225
-                                        : (mod(i, 2) == 0 ? transparent : #ffffff08));
+                                background: entry.selected
+                                    ? #4a90e235
+                                    : (i == root.selected-row
+                                        ? #4a90e240
+                                        : (row-ta.has-hover
+                                            ? #4a90e225
+                                            : (mod(i, 2) == 0 ? transparent : #ffffff08)));
 
                                 row-ta := TouchArea {
                                     mouse-cursor: pointer;
@@ -415,7 +512,32 @@ export component SftpPanel inherits Rectangle {
                                 }
 
                                 HorizontalLayout {
-                                    padding-left: 8px; padding-right: 8px; spacing: 4px;
+                                    padding-left: 8px; padding-right: 8px; spacing: 8px;
+                                    // Multi-select checkbox (#100). Its own TouchArea
+                                    // sits above the row, so toggling doesn't trigger
+                                    // navigate/select.
+                                    Rectangle {
+                                        width: 16px;
+                                        y: (parent.height - self.height) / 2;
+                                        height: 16px;
+                                        border-radius: 3px;
+                                        border-width: 1px;
+                                        border-color: entry.selected ? Theme.accent : Theme.border-strong;
+                                        background: entry.selected ? Theme.accent : transparent;
+                                        cb-ta := TouchArea {
+                                            mouse-cursor: pointer;
+                                            clicked => { root.toggle-select(i); }
+                                        }
+                                        if entry.selected : Text {
+                                            text: "\u{E5CA}"; // check
+                                            font-family: "Material Icons";
+                                            color: #ffffff;
+                                            font-size: 13px;
+                                            horizontal-alignment: center;
+                                            vertical-alignment: center;
+                                            width: parent.width; height: parent.height;
+                                        }
+                                    }
                                     Text {
                                         text: entry.is-dir ? "📁 " + entry.name : "📄 " + entry.name;
                                         color: entry.is-dir ? Theme.accent : Theme.text-primary;
@@ -424,12 +546,12 @@ export component SftpPanel inherits Rectangle {
                                         overflow: elide;
                                         vertical-alignment: center;
                                     }
-                                    Text {
+                                    if root.show-size-col : Text {
                                         text: entry.is-dir ? "" : entry.size;
                                         color: Theme.text-secondary; font-size: Theme.fs-xs;
                                         width: 72px; horizontal-alignment: right; vertical-alignment: center;
                                     }
-                                    Text {
+                                    if root.show-modified-col : Text {
                                         text: entry.modified;
                                         color: Theme.text-muted; font-size: Theme.fs-xs;
                                         width: 116px; horizontal-alignment: right; vertical-alignment: center;

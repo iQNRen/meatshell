@@ -33,9 +33,16 @@ export struct TermMatch {
 }
 
 // One saved quick command (#55): a name shown on the chip + the text to send.
+// Grouped like the welcome session list: group-header is non-empty on the first
+// row of each group; collapsed hides the group's rows in the popup; orig-index
+// points back to the entry's position in the stored list (delete target).
 export struct QuickCmd {
     name: string,
     command: string,
+    group: string,
+    group-header: string,
+    collapsed: bool,
+    orig-index: int,
 }
 
 // --- MenuItem --------------------------------------------------------------
@@ -83,6 +90,8 @@ export component TerminalView inherits Rectangle {
     in property <int> cursor-row;       // cursor cell (grid coords)
     in property <int> cursor-col;
     in property <int> rows-used;        // content rows, for viewport sizing
+    in property <int> scroll-max;       // scrollback depth (max offset) (#103)
+    in property <int> scroll-offset;    // current offset (0 = live bottom) (#103)
     in property <bool>   is-alt-screen;
     in property <[TermMatch]> find-matches; // search-highlight rectangles
     in property <[TermMatch]> selection;    // drag-selection highlight rectangles
@@ -94,10 +103,28 @@ export component TerminalView inherits Rectangle {
     in property <[SftpTreeNode]> sftp-tree-nodes: [];
 
     in-out property <length> sftp-panel-height: 220px;
+    in-out property <length> sftp-panel-width: 380px;     // extent when docked left/right
     // Shared with the AppWindow (like sftp-panel-height) so a startup default can
     // collapse the panel and the state stays consistent across tabs (#78).
     in-out property <length> sftp-saved-height: 220px;   // height to restore on un-collapse
     in-out property <bool>   sftp-collapsed: false;       // SFTP panel minimised (toolbar only)
+
+    // --- SFTP docking (within the terminal area) ---------------------------
+    // Which edge of the terminal area the SFTP panel sits on: left|right|top|bottom.
+    in-out property <string> sftp-dock: "bottom";
+    property <bool> sftp-horizontal: root.sftp-dock == "left" || root.sftp-dock == "right";
+    // Drag-to-dock snap state (mirrors the resource-panel docking in app.slint).
+    property <bool> sftp-panel-dragging;
+    property <float> sftp-drag-nx;
+    property <float> sftp-drag-ny;
+    property <string> sftp-dock-target:
+        !root.sftp-panel-dragging ? ""
+        : root.sftp-drag-nx < 0.22 ? "left"
+        : root.sftp-drag-nx > 0.78 ? "right"
+        : root.sftp-drag-ny < 0.22 ? "top"
+        : root.sftp-drag-ny > 0.78 ? "bottom"
+        : "";
+    callback persist-sftp-dock(string);
 
     // Command bar (#55): quick commands + input box + history (all shared/global,
     // fed from Rust); send-to-all is a per-tab toggle.
@@ -110,6 +137,15 @@ export component TerminalView inherits Rectangle {
     property <int> history-cursor: -1;         // ↑/↓ recall index (-1 = live input)
     callback run-command(string /* cmd */, bool /* to-all */);
     callback manage-quick-commands();          // open the add/edit/delete dialog
+    callback toggle-quick-group(string /* group */);  // collapse/expand a group (#55)
+    // Right-click management on the popup, mirroring the welcome session list (#55).
+    callback edit-quick-command(int /* index */);
+    callback duplicate-quick-command(int /* index */);
+    callback delete-quick-command(int /* index */);
+    callback move-quick-command(int /* index */, string /* group */);
+    callback new-quick-group();
+    callback rename-quick-group(string /* group */);
+    callback delete-quick-group(string /* group */);
     callback copy-text(string);                // copy a history command to clipboard (#96)
     callback delete-history(int /* index */);  // remove a history entry (#96)
     callback delete-history-cmd(string /* cmd */); // remove a history entry by command (#101)
@@ -123,6 +159,10 @@ export component TerminalView inherits Rectangle {
     callback sftp-refresh(string);
     callback sftp-tree-expand(string);
     callback sftp-delete(string);
+    in property <int> sftp-selected-count;          // checked-entry count (#100)
+    callback sftp-toggle-select(int);               // toggle a row's checkbox (#100)
+    callback sftp-download-selected();              // download checked entries (#100)
+    callback sftp-delete-selected();                // delete checked entries (#100)
     callback sftp-view(string);
     callback sftp-edit(string);
     callback sftp-open-external(string);
@@ -138,6 +178,7 @@ export component TerminalView inherits Rectangle {
     callback clear-terminal();              // wipe this session's screen buffer
     callback find-query-changed(string);    // recompute search highlights
     callback terminal-scroll(int);          // scroll history by N lines (+ = up)
+    callback terminal-scroll-to(int);       // jump to an absolute scrollback offset (#103)
     callback select-start(int, int);        // begin drag-selection at (row, col)
     callback select-update(int, int);       // extend drag-selection to (row, col)
     callback select-end();                  // finish selection → copy to clipboard
@@ -269,6 +310,26 @@ export component TerminalView inherits Rectangle {
                 opacity: 0.7;
             }
         }
+
+        // SFTP docking region — terminal + command-bar (central) on one side,
+        // the SFTP panel docked to the chosen edge. Absolute geometry, mirroring
+        // the resource-panel dock area in app.slint (#dock).
+        dock-region := Rectangle {
+        vertical-stretch: 1;
+        // Collapsed → the panel fully disappears (like the resource panel); a
+        // floating expand button on the docked edge brings it back (#dock).
+        property <length> sf-w: root.sftp-collapsed ? 0px : root.sftp-panel-width;
+        property <length> sf-h: root.sftp-collapsed ? 0px : root.sftp-panel-height;
+        property <length> sp:   root.sftp-collapsed ? 0px : 4px;
+
+        central := Rectangle {
+            x: root.sftp-dock == "left" ? parent.sf-w + parent.sp : 0px;
+            y: root.sftp-dock == "top"  ? parent.sf-h + parent.sp : 0px;
+            width:  root.sftp-horizontal ? parent.width - parent.sf-w - parent.sp : parent.width;
+            height: root.sftp-horizontal ? parent.height : parent.height - parent.sf-h - parent.sp;
+            clip: true;
+            VerticalLayout {
+            spacing: 0;
 
         // --- Key-capture scope + scrollable output --------------------------
         key-capture := FocusScope {
@@ -589,6 +650,40 @@ export component TerminalView inherits Rectangle {
             }
 
             // --- Find bar (overlay, top) ------------------------------------
+            // Terminal scrollbar (#103) — a slim overlay on the right edge of the
+            // output area, shown only when there's scrollback (and not on the
+            // alternate screen). Driven by scroll-max/scroll-offset; click or drag
+            // the track to jump to an absolute position.
+            if root.scroll-max > 0 && !root.is-alt-screen : Rectangle {
+                x: flickable.x + flickable.width - 10px;
+                y: flickable.y + 4px;
+                width: 8px;
+                height: flickable.height - 8px;
+                track-ta := TouchArea {
+                    moved => {
+                        if (self.pressed) {
+                            root.terminal-scroll-to(clamp(round(root.scroll-max * (1 - self.mouse-y / self.height)), 0, root.scroll-max));
+                        }
+                    }
+                    pointer-event(e) => {
+                        if (e.kind == PointerEventKind.down && e.button == PointerEventButton.left) {
+                            root.terminal-scroll-to(clamp(round(root.scroll-max * (1 - self.mouse-y / self.height)), 0, root.scroll-max));
+                        }
+                    }
+                }
+                Rectangle {
+                    property <float> total: root.scroll-max + root.term-rows;
+                    x: 1px;
+                    width: 6px;
+                    height: max(28px, parent.height * root.term-rows / total);
+                    y: (parent.height - self.height) * (root.scroll-max - root.scroll-offset) / max(1, root.scroll-max);
+                    background: track-ta.has-hover || track-ta.pressed
+                        ? Theme.text-secondary : Theme.border-strong;
+                    border-radius: 3px;
+                    animate background { duration: 100ms; }
+                }
+            }
+
             if root.find-active : Rectangle {
                 x: 0;
                 y: 0;
@@ -745,6 +840,25 @@ export component TerminalView inherits Rectangle {
                                     }
                                 }
                                 accept
+                            // --- readline line-editing keys (#103) ---
+                            // Ctrl+A → start of line.
+                            } else if (e.modifiers.control && (e.text == "a" || e.text == "A" || e.text == "\u{0001}")) {
+                                self.set-selection-offsets(0, 0);
+                                accept
+                            // Ctrl+E → end of line.
+                            } else if (e.modifiers.control && (e.text == "e" || e.text == "E" || e.text == "\u{0005}")) {
+                                self.set-selection-offsets(1000000, 1000000);
+                                accept
+                            // Ctrl+K → kill from cursor to end (deletes + clipboard).
+                            } else if (e.modifiers.control && (e.text == "k" || e.text == "K" || e.text == "\u{000B}")) {
+                                self.set-selection-offsets(self.cursor-position_byte-offset, 1000000);
+                                self.cut();
+                                accept
+                            // Ctrl+U → kill from start to cursor.
+                            } else if (e.modifiers.control && (e.text == "u" || e.text == "U" || e.text == "\u{0015}")) {
+                                self.set-selection-offsets(0, self.cursor-position_byte-offset);
+                                self.cut();
+                                accept
                             } else {
                                 reject
                             }
@@ -816,8 +930,8 @@ export component TerminalView inherits Rectangle {
             // --- Quick-command popup (opens upward) --------------------------
             if root.quick-open : Rectangle {
                 x: 8px;
-                width: 300px;
-                height: min(260px, qc-col.preferred-height + 8px);
+                width: 420px;
+                height: min(320px, qc-col.preferred-height + 8px);
                 y: -self.height - 2px;
                 background: Theme.bg-panel;
                 border-radius: Theme.radius-md;
@@ -838,23 +952,152 @@ export component TerminalView inherits Rectangle {
                             horizontal-alignment: center;
                             height: 32px; vertical-alignment: center;
                         }
-                        for q in root.quick-commands : Rectangle {
-                            height: 34px;
-                            border-radius: Theme.radius-sm;
-                            background: q-item-ta.has-hover ? Theme.bg-hover : transparent;
-                            q-item-ta := TouchArea {
-                                mouse-cursor: pointer;
-                                clicked => {
-                                    root.run-command(q.command, root.send-to-all);
-                                    root.quick-open = false;
+                        for q in root.quick-commands : VerticalLayout {
+                            // Group header on the first row of each group (#55) —
+                            // click to collapse/expand the whole group.
+                            if q.group-header != "" : Rectangle {
+                                height: 24px;
+                                property <length> gmx;
+                                property <length> gmy;
+                                grp-ta := TouchArea {
+                                    mouse-cursor: pointer;
+                                    clicked => { root.toggle-quick-group(q.group); }
+                                    pointer-event(e) => {
+                                        if (e.kind == PointerEventKind.down && e.button == PointerEventButton.right) {
+                                            gmx = self.mouse-x; gmy = self.mouse-y; qpop-grp-menu.show();
+                                        }
+                                    }
+                                }
+                                HorizontalLayout {
+                                    padding-left: 4px; padding-top: 4px; spacing: 4px;
+                                    Text {
+                                        text: q.collapsed ? "\u{E5CC}" : "\u{E5CF}"; // chevron ▶/▼
+                                        font-family: "Material Icons";
+                                        color: Theme.text-muted; font-size: Theme.fs-sm;
+                                        vertical-alignment: center;
+                                    }
+                                    Text {
+                                        text: "\u{E2C7}"; // folder
+                                        font-family: "Material Icons";
+                                        color: Theme.text-muted; font-size: Theme.fs-sm;
+                                        vertical-alignment: center;
+                                    }
+                                    Text {
+                                        text: q.group; color: Theme.text-muted; font-size: Theme.fs-xs;
+                                        font-weight: 700; vertical-alignment: center;
+                                        horizontal-stretch: 1; horizontal-alignment: left;
+                                    }
+                                }
+                                qpop-grp-menu := PopupWindow {
+                                    x: gmx; y: gmy; width: 150px;
+                                    height: (q.orig-index == -1 ? 3 : 2) * 30px + 9px;
+                                    Rectangle {
+                                        background: Theme.bg-panel; border-radius: Theme.radius-sm;
+                                        border-width: 1px; border-color: Theme.border-strong;
+                                        drop-shadow-blur: 10px; drop-shadow-color: #00000050;
+                                        VerticalLayout {
+                                            padding: 4px; spacing: 1px;
+                                            Rectangle { height: 30px; border-radius: Theme.radius-sm;
+                                                background: pg-ren-ta.has-hover ? Theme.bg-hover : transparent;
+                                                pg-ren-ta := TouchArea { mouse-cursor: pointer; clicked => { root.rename-quick-group(q.group); } }
+                                                HorizontalLayout { padding-left: 10px; spacing: 8px;
+                                                    Text { text: "\u{E3C9}"; font-family: "Material Icons"; color: Theme.text-secondary; font-size: Theme.fs-sm; vertical-alignment: center; }
+                                                    Text { text: @tr("Rename group"); color: Theme.text-primary; font-size: Theme.fs-md; vertical-alignment: center; horizontal-stretch: 1; } } }
+                                            if q.orig-index == -1 : Rectangle { height: 30px; border-radius: Theme.radius-sm;
+                                                background: pg-del-ta.has-hover ? #cc333320 : transparent;
+                                                pg-del-ta := TouchArea { mouse-cursor: pointer; clicked => { root.delete-quick-group(q.group); } }
+                                                HorizontalLayout { padding-left: 10px; spacing: 8px;
+                                                    Text { text: "\u{E872}"; font-family: "Material Icons"; color: #cc3333; font-size: Theme.fs-sm; vertical-alignment: center; }
+                                                    Text { text: @tr("Delete group"); color: #cc3333; font-size: Theme.fs-md; vertical-alignment: center; horizontal-stretch: 1; } } }
+                                            Rectangle { height: 30px; border-radius: Theme.radius-sm;
+                                                background: pg-new-ta.has-hover ? Theme.bg-hover : transparent;
+                                                pg-new-ta := TouchArea { mouse-cursor: pointer; clicked => { root.new-quick-group(); } }
+                                                HorizontalLayout { padding-left: 10px; spacing: 8px;
+                                                    Text { text: "\u{E2CC}"; font-family: "Material Icons"; color: Theme.text-secondary; font-size: Theme.fs-sm; vertical-alignment: center; }
+                                                    Text { text: @tr("New group"); color: Theme.text-primary; font-size: Theme.fs-md; vertical-alignment: center; horizontal-stretch: 1; } } }
+                                        }
+                                    }
                                 }
                             }
-                            VerticalLayout {
-                                padding-left: 8px; padding-right: 8px;
-                                Text { text: q.name; color: Theme.text-primary; font-size: Theme.fs-sm;
-                                       overflow: elide; }
-                                Text { text: q.command; color: Theme.text-muted; font-size: Theme.fs-xs;
-                                       overflow: elide; font-family: Theme.ui-font-family; }
+                            if !q.collapsed && q.orig-index >= 0 : Rectangle {
+                                height: 30px;
+                                border-radius: Theme.radius-sm;
+                                background: q-item-ta.has-hover ? Theme.bg-hover : transparent;
+                                property <length> ctx-x;
+                                property <length> ctx-y;
+                                q-item-ta := TouchArea {
+                                    mouse-cursor: pointer;
+                                    clicked => {
+                                        root.run-command(q.command, root.send-to-all);
+                                        root.quick-open = false;
+                                    }
+                                    pointer-event(e) => {
+                                        if (e.kind == PointerEventKind.down && e.button == PointerEventButton.right) {
+                                            ctx-x = self.mouse-x; ctx-y = self.mouse-y; qpop-ctx-menu.show();
+                                        }
+                                    }
+                                }
+                                // Name + command on one line; each elides so a long
+                                // entry never overflows the popup (#55).
+                                HorizontalLayout {
+                                    padding-left: 8px; padding-right: 8px; spacing: 10px;
+                                    Text { text: q.name; color: Theme.text-primary; font-size: Theme.fs-sm;
+                                           vertical-alignment: center; overflow: elide;
+                                           horizontal-stretch: 1; }
+                                    Text { text: q.command; color: Theme.text-muted; font-size: Theme.fs-xs;
+                                           vertical-alignment: center; overflow: elide;
+                                           horizontal-alignment: right; horizontal-stretch: 1;
+                                           font-family: Theme.ui-font-family; }
+                                }
+                                qpop-ctx-menu := PopupWindow {
+                                    x: ctx-x; y: ctx-y; width: 160px;
+                                    height: qpop-ctx-vl.preferred-height;
+                                    Rectangle {
+                                        background: Theme.bg-panel; border-radius: Theme.radius-sm;
+                                        border-width: 1px; border-color: Theme.border-strong;
+                                        drop-shadow-blur: 10px; drop-shadow-color: #00000050;
+                                        qpop-ctx-vl := VerticalLayout {
+                                            padding: 4px; spacing: 1px;
+                                            Rectangle { height: 28px; border-radius: Theme.radius-sm;
+                                                background: pi-edit-ta.has-hover ? Theme.bg-hover : transparent;
+                                                pi-edit-ta := TouchArea { mouse-cursor: pointer; clicked => { root.quick-open = false; root.edit-quick-command(q.orig-index); } }
+                                                HorizontalLayout { padding-left: 10px; spacing: 8px;
+                                                    Text { text: "\u{E3C9}"; font-family: "Material Icons"; color: Theme.text-secondary; font-size: Theme.fs-sm; vertical-alignment: center; }
+                                                    Text { text: @tr("Edit"); color: Theme.text-primary; font-size: Theme.fs-md; vertical-alignment: center; horizontal-stretch: 1; } } }
+                                            Rectangle { height: 28px; border-radius: Theme.radius-sm;
+                                                background: pi-dup-ta.has-hover ? Theme.bg-hover : transparent;
+                                                pi-dup-ta := TouchArea { mouse-cursor: pointer; clicked => { root.duplicate-quick-command(q.orig-index); } }
+                                                HorizontalLayout { padding-left: 10px; spacing: 8px;
+                                                    Text { text: "\u{E14D}"; font-family: "Material Icons"; color: Theme.text-secondary; font-size: Theme.fs-sm; vertical-alignment: center; }
+                                                    Text { text: @tr("Duplicate"); color: Theme.text-primary; font-size: Theme.fs-md; vertical-alignment: center; horizontal-stretch: 1; } } }
+                                            Rectangle { height: 28px; border-radius: Theme.radius-sm;
+                                                background: pi-del-ta.has-hover ? #cc333320 : transparent;
+                                                pi-del-ta := TouchArea { mouse-cursor: pointer; clicked => { root.delete-quick-command(q.orig-index); } }
+                                                HorizontalLayout { padding-left: 10px; spacing: 8px;
+                                                    Text { text: "\u{E872}"; font-family: "Material Icons"; color: #cc3333; font-size: Theme.fs-sm; vertical-alignment: center; }
+                                                    Text { text: @tr("Delete"); color: #cc3333; font-size: Theme.fs-md; vertical-alignment: center; horizontal-stretch: 1; } } }
+                                            Rectangle { height: 1px; background: Theme.border-subtle; }
+                                            HorizontalLayout { padding-left: 10px; padding-top: 2px; spacing: 6px;
+                                                Text { text: "\u{E2C7}"; font-family: "Material Icons"; color: Theme.text-muted; font-size: Theme.fs-xs; vertical-alignment: center; }
+                                                Text { text: @tr("Move to"); color: Theme.text-muted; font-size: Theme.fs-xs; vertical-alignment: center; horizontal-stretch: 1; } }
+                                            if q.group != "default" : Rectangle { height: 28px; border-radius: Theme.radius-sm;
+                                                background: pi-md-ta.has-hover ? Theme.bg-hover : transparent;
+                                                pi-md-ta := TouchArea { mouse-cursor: pointer; clicked => { root.move-quick-command(q.orig-index, "default"); } }
+                                                HorizontalLayout { padding-left: 10px; spacing: 8px;
+                                                    Text { text: "\u{E2C7}"; font-family: "Material Icons"; color: Theme.text-secondary; font-size: Theme.fs-sm; vertical-alignment: center; }
+                                                    Text { text: "default"; color: Theme.text-primary; font-size: Theme.fs-md; vertical-alignment: center; horizontal-stretch: 1; } } }
+                                            for s in root.quick-commands : Rectangle {
+                                                visible: s.group-header != "" && s.group != "default" && s.group != q.group;
+                                                height: self.visible ? 28px : 0px;
+                                                border-radius: Theme.radius-sm;
+                                                background: pi-mv-ta.has-hover ? Theme.bg-hover : transparent;
+                                                pi-mv-ta := TouchArea { mouse-cursor: pointer; clicked => { root.move-quick-command(q.orig-index, s.group); } }
+                                                HorizontalLayout { padding-left: 10px; spacing: 8px;
+                                                    Text { text: "\u{E2C7}"; font-family: "Material Icons"; color: Theme.text-secondary; font-size: Theme.fs-sm; vertical-alignment: center; }
+                                                    Text { text: s.group; color: Theme.text-primary; font-size: Theme.fs-md; vertical-alignment: center; horizontal-stretch: 1; overflow: elide; } } }
+                                        }
+                                    }
+                                }
                             }
                         }
                         // Manage entry.
@@ -1006,48 +1249,92 @@ export component TerminalView inherits Rectangle {
                 }
             }
         }
+            }
+        }
 
-        // --- Drag handle ----------------------------------------------------
+        // --- SFTP resize splitter (orientation follows the dock edge) -------
         Rectangle {
-            height: 4px;
+            visible: !root.sftp-collapsed;   // gone when collapsed (like the resource splitter)
+            x: root.sftp-dock == "left"   ? parent.sf-w
+             : root.sftp-dock == "right"  ? parent.width - parent.sf-w - 4px
+             : 0px;
+            y: root.sftp-dock == "top"    ? parent.sf-h
+             : root.sftp-dock == "bottom" ? parent.height - parent.sf-h - 4px
+             : 0px;
+            width:  root.sftp-horizontal ? 4px : parent.width;
+            height: root.sftp-horizontal ? parent.height : 4px;
             background: divider-ta.has-hover || root.sftp-dragging
-                ? Theme.accent
-                : Theme.border-subtle;
-
+                ? Theme.accent : Theme.border-subtle;
             divider-ta := TouchArea {
-                mouse-cursor: row-resize;
-
+                // Hit area extends a few px past the thin visual bar so it's easy
+                // to grab without landing on the terminal / SFTP edge.
+                x: root.sftp-horizontal ? -4px : 0px;
+                y: root.sftp-horizontal ? 0px : -4px;
+                width:  root.sftp-horizontal ? 12px : parent.width;
+                height: root.sftp-horizontal ? parent.height : 12px;
+                mouse-cursor: root.sftp-horizontal ? ew-resize : ns-resize;
                 pointer-event(ev) => {
                     if (ev.kind == PointerEventKind.down) {
-                        root.sftp-dragging      = true;
-                        root.drag-start-mouse-y = self.mouse-y;
+                        root.sftp-dragging = true;
+                        root.sftp-collapsed = false;
                     } else if (ev.kind == PointerEventKind.up) {
                         root.sftp-dragging = false;
                     }
                 }
-
+                // Direct tracking: the panel's docked edge follows the cursor's
+                // position within the (stable) dock-region — no deltas, so no
+                // moving-frame / accumulation issues. NOTE: `parent` here is the
+                // thin splitter Rectangle, so refer to `dock-region` explicitly
+                // for the region's size/origin (#dock).
                 moved => {
                     if (root.sftp-dragging) {
-                        root.sftp-collapsed = false; // dragging the handle un-collapses
-                        root.sftp-panel-height = clamp(
-                            root.sftp-panel-height + root.drag-start-mouse-y - self.mouse-y,
-                            60px,
-                            root.height - 24px - 4px - 16px - 80px
-                        );
+                        if (root.sftp-horizontal) {
+                            // Floor of 150px — by then Size+Modified columns have
+                            // dropped and only Name remains; no narrower (#dock).
+                            root.sftp-panel-width = clamp(
+                                root.sftp-dock == "right"
+                                    ? dock-region.width - ((self.absolute-position.x + self.mouse-x) - dock-region.absolute-position.x)
+                                    : (self.absolute-position.x + self.mouse-x) - dock-region.absolute-position.x,
+                                150px, max(160px, dock-region.width - 200px));
+                        } else {
+                            root.sftp-panel-height = clamp(
+                                root.sftp-dock == "bottom"
+                                    ? dock-region.height - ((self.absolute-position.y + self.mouse-y) - dock-region.absolute-position.y)
+                                    : (self.absolute-position.y + self.mouse-y) - dock-region.absolute-position.y,
+                                60px, max(80px, dock-region.height - 80px));
+                        }
                     }
                 }
             }
         }
 
-        // --- SFTP panel -----------------------------------------------------
+        // --- SFTP panel — positioned on the docked edge ---------------------
         SftpPanel {
-            height: root.sftp-panel-height;
+            x: root.sftp-dock == "right"  ? parent.width - parent.sf-w : 0px;
+            y: root.sftp-dock == "bottom" ? parent.height - parent.sf-h : 0px;
+            width:  root.sftp-horizontal ? parent.sf-w : parent.width;
+            height: root.sftp-horizontal ? parent.height : parent.sf-h;
+            show-tree: !root.sftp-horizontal;   // hide the tree when narrow (vertical)
+            compact: root.sftp-collapsed && root.sftp-horizontal;  // clean strip when side+collapsed
+            dock-drag-move(ax, ay) => {
+                root.sftp-panel-dragging = true;
+                root.sftp-drag-nx = (ax - dock-region.absolute-position.x) / dock-region.width;
+                root.sftp-drag-ny = (ay - dock-region.absolute-position.y) / dock-region.height;
+            }
+            dock-drag-end() => {
+                if (root.sftp-dock-target != "") {
+                    root.sftp-dock = root.sftp-dock-target;
+                    root.persist-sftp-dock(root.sftp-dock);
+                }
+                root.sftp-panel-dragging = false;
+            }
             collapsed:     root.sftp-collapsed;
             current-path:  root.sftp-path;
             entries:       root.sftp-entries;
             status:        root.sftp-status;
             loading:       root.sftp-loading;
             tree-nodes:    root.sftp-tree-nodes;
+            selected-count: root.sftp-selected-count;
             toggle-collapsed => {
                 if (root.sftp-collapsed) {
                     // Restore to the saved height.
@@ -1066,6 +1353,9 @@ export component TerminalView inherits Rectangle {
             refresh(path)       => { root.sftp-refresh(path); }
             tree-expand(path)   => { root.sftp-tree-expand(path); }
             delete(path)        => { root.sftp-delete(path); }
+            toggle-select(i)    => { root.sftp-toggle-select(i); }
+            download-selected() => { root.sftp-download-selected(); }
+            delete-selected()   => { root.sftp-delete-selected(); }
             view(path)          => { root.sftp-view(path); }
             edit(path)          => { root.sftp-edit(path); }
             open-external(path) => { root.sftp-open-external(path); }
@@ -1075,6 +1365,66 @@ export component TerminalView inherits Rectangle {
             copy-path(path)     => { root.sftp-copy-path(path); }
             new-folder(dir)     => { root.sftp-new-folder(dir); }
             new-file(dir)       => { root.sftp-new-file(dir); }
+        }
+
+        // Drag-to-dock snap overlay — four edge zones; the one under the cursor
+        // (sftp-dock-target) lights up. Purely visual (#dock).
+        if root.sftp-panel-dragging : Rectangle {
+            x: 0; y: 0; width: parent.width; height: parent.height;
+            Rectangle {
+                x: 0; y: 0; width: parent.width * 0.22; height: parent.height;
+                background: root.sftp-dock-target == "left" ? Theme.accent.with-alpha(0.35) : Theme.accent.with-alpha(0.10);
+                border-width: root.sftp-dock-target == "left" ? 2px : 0px; border-color: Theme.accent;
+            }
+            Rectangle {
+                x: parent.width * 0.78; y: 0; width: parent.width * 0.22; height: parent.height;
+                background: root.sftp-dock-target == "right" ? Theme.accent.with-alpha(0.35) : Theme.accent.with-alpha(0.10);
+                border-width: root.sftp-dock-target == "right" ? 2px : 0px; border-color: Theme.accent;
+            }
+            Rectangle {
+                x: 0; y: 0; width: parent.width; height: parent.height * 0.22;
+                background: root.sftp-dock-target == "top" ? Theme.accent.with-alpha(0.35) : Theme.accent.with-alpha(0.10);
+                border-width: root.sftp-dock-target == "top" ? 2px : 0px; border-color: Theme.accent;
+            }
+            Rectangle {
+                x: 0; y: parent.height * 0.78; width: parent.width; height: parent.height * 0.22;
+                background: root.sftp-dock-target == "bottom" ? Theme.accent.with-alpha(0.35) : Theme.accent.with-alpha(0.10);
+                border-width: root.sftp-dock-target == "bottom" ? 2px : 0px; border-color: Theme.accent;
+            }
+        }
+
+        // Expand button — the collapsed panel fully disappears, so float a clear
+        // expand button on whichever edge it was docked to (like the resource
+        // panel). Chevron points away from the edge, toward where it reopens.
+        if root.sftp-collapsed : Rectangle {
+            width: 24px; height: 24px;
+            x: root.sftp-dock == "right"  ? parent.width - self.width - 2px
+             : root.sftp-dock == "top" || root.sftp-dock == "bottom" ? 6px
+             : 2px;
+            // Centre vertically on left/right edges (consistent with the resource
+            // panel); at the edge for top/bottom.
+            y: root.sftp-dock == "bottom" ? parent.height - self.height - 2px
+             : root.sftp-dock == "top"    ? 2px
+             : (parent.height - self.height) / 2;
+            border-radius: Theme.radius-sm;
+            background: sftp-exp-ta.has-hover ? Theme.bg-hover : Theme.bg-elevated;
+            border-width: 1px; border-color: Theme.border-subtle;
+            sftp-exp-ta := TouchArea {
+                mouse-cursor: pointer;
+                clicked => {
+                    root.sftp-panel-height = root.sftp-saved-height;
+                    root.sftp-collapsed = false;
+                }
+            }
+            Text {
+                text: root.sftp-dock == "right"  ? "\u{E5CB}"   // chevron_left
+                    : root.sftp-dock == "top"    ? "\u{E5CF}"   // expand_more
+                    : root.sftp-dock == "bottom" ? "\u{E5CE}"   // expand_less
+                    : "\u{E5CC}";                               // chevron_right (left dock)
+                font-family: "Material Icons"; font-size: 16px; color: Theme.text-secondary;
+                horizontal-alignment: center; vertical-alignment: center;
+            }
+        }
         }
     }
 }

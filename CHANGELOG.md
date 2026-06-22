@@ -5,6 +5,286 @@ All notable changes are documented here. 本文件记录所有重要变更。
 
 ## [Unreleased]
 
+## [0.4.14] - 2026-06-22
+
+### Added / 新增
+
+- **面板可拖动吸附停靠(资源面板 + SFTP)。** 资源面板和 SFTP 面板现在都能拖到四条边
+  (上/下/左/右):拖动面板手柄时,四条边浮现高亮放置区,松手即吸附到那条边。两个面板都
+  可拖动调节大小;折叠后会缩成停靠边缘的一个小展开按钮(彻底隐藏面板)。**自适应:** 资源
+  面板横向(上/下)停靠时,内部小组件自动改为横排;SFTP 竖向(左/右、窄)停靠时隐藏目录树,
+  并随宽度**渐进隐藏「大小→时间」列**(名称快被挤成「…」时才让位),横向(上/下、宽)停靠
+  则恒显示全部列。SFTP 工具栏左侧新增专用拖动手柄,密集控件下也能稳稳拖动。
+  **Drag-to-dock panels (resource panel + SFTP).** Both the resource panel and the SFTP
+  panel can now be dragged to any edge (top / bottom / left / right): dragging the
+  panel's handle shows highlighted drop zones on all four edges, and releasing snaps it
+  there. Both panels are drag-resizable and collapse to a small expand button on their
+  docked edge (fully hiding the panel). **Responsive:** the resource panel lays its
+  widgets out in a row when docked horizontally; the SFTP panel hides its directory tree
+  when docked vertically (narrow) and progressively drops the **Size → Modified** columns
+  as it narrows (only once the Name would elide to “…”), while a horizontal (wide) dock
+  always shows every column. A dedicated drag grip was added to the SFTP toolbar so the
+  panel is grabbable even though its toolbar is full of controls.
+
+- **布局持久化。** 两个面板的停靠边与宽/高,以及父窗口大小,都会在退出时保存、下次启动
+  恢复——可以保留你喜欢的窗口尺寸和面板布局。
+  **Layout persistence.** Each panel's docked edge and size, plus the window size, are
+  saved on exit and restored on the next launch — so your preferred window size and
+  panel arrangement stick.
+
+### Fixed / 修复
+
+- **macOS 欢迎页布局错位。** 欢迎页的标题、副标题、快速连接卡片在 macOS 上被拉开(标题与
+  副标题间出现大空隙)。现在 Welcome 显式填满内容区、头部固定在顶部按自然高度排列,卡片填满
+  其余空间。
+  **macOS welcome-page layout spread apart.** The title, tagline and quick-connect card
+  were spaced out on macOS (a large gap between the title and tagline). The Welcome view
+  now explicitly fills the content area and the header is pinned to the top at its
+  natural height, with the card filling the rest.
+
+## [0.4.13] - 2026-06-21
+
+### Fixed / 修复
+
+- **堡垒机(JumpServer 等)密码登录“认证失败” (#86)。** 这类堡垒机默认只放行
+  `keyboard-interactive` 认证、关闭 `password` 方法,旧版只尝试 `password`,因此直接
+  “认证失败”——Xshell/MobaXterm/WindTerm 能登正是因为会自动回退。现在密码认证失败后会
+  断开并重连一条全新连接,改用 `keyboard-interactive` 以密码应答服务器提示。注意:russh
+  在一次失败的认证后无法在同一句柄上切换认证方法(会卡死),因此回退必须重连。已在真实的
+  keyboard-interactive-only sshd 上验证登录成功。
+  **Password login through bastions (JumpServer etc.) failed with “authentication
+  failed” (#86).** Such bastions disable the `password` SSH method and only accept
+  `keyboard-interactive`; the old code only tried `password`, so it failed outright —
+  other clients get in because they fall back automatically. Now, on password-auth
+  failure we disconnect and reconnect on a fresh handle, then authenticate via
+  `keyboard-interactive`, answering each prompt with the password. (russh hangs if a
+  second auth method is attempted on a handle whose first attempt already failed, so a
+  reconnect is required.) Verified against a real keyboard-interactive-only sshd.
+
+### Changed / 优化
+
+- **设置·界面简约重做。** 右侧从竖排改为「分区 + 标签左·控件右」的紧凑布局(iOS 风
+  开关、`[− 值 +]` 步进器、固定字号不随界面缩放放大,解决“字体过大”观感);仍为内嵌
+  模态浮层,打开时遮罩吞鼠标 + 抢焦点吞键盘,禁止对主窗口的一切输入,卡片只能在窗口内拖动。
+  **Redesigned Interface settings.** The right pane moves from stacked fields to a
+  compact “section + label-left · control-right” layout (iOS-style switches,
+  `[− value +]` steppers, fixed typography that ignores UI scale — fixing the
+  “fonts too big” feel). Still an embedded modal overlay that blocks all input while
+  open (veil swallows mouse, focus scope swallows keys); the card only drags within
+  the window.
+
+- **初始窗口放大到 1440×900。** 从 1200×760 提升到更舒适的默认尺寸,对齐同类客户端。
+  **Larger default window, 1440×900.** Up from 1200×760, matching comparable clients.
+
+- **Quieter startup logs.** Silenced fontdb's harmless "malformed font" warning for
+  system fonts it can't parse but skips anyway (e.g. Windows' `mstmc.ttf`), and
+  demoted the routine UI-font-selection line to `debug` — only an actual font-load
+  failure still warns. `error.log` stays clean.
+  **更安静的启动日志。** 屏蔽 fontdb 对无法解析(但会自动跳过)的系统字体发出的
+  「malformed font」无害告警(如 Windows 的 `mstmc.ttf`),并把常规的界面字体选择日志
+  降为 `debug`——只有真正的字体加载失败才会告警。`error.log` 保持干净。
+
+### Added / 新增
+
+- **侧栏可拖动调宽。** 在资源面板与主区之间加了可拖动分隔条,宽度可在 160–520px 间
+  调节并持久化到配置(重启保留);折叠侧栏时分隔条自动隐藏,拖动期间禁用折叠动画以跟手。
+  **Drag-resize the sidebar.** A draggable splitter sits between the resource panel and
+  the main area; the width is adjustable within 160–520px and persisted to config
+  (survives restart). The splitter hides when the sidebar is collapsed, and the
+  collapse animation is disabled while dragging for 1:1 tracking.
+
+- **进程监视独立窗口。** 进程监视从内嵌浮层提升为真正的独立 OS 窗口,可拖出主窗口、
+  拖到第二块屏幕;无边框自绘标题栏 + 右下角缩放手柄,与主窗口实时共享同一份进程数据。
+  **Detachable process-monitor window.** The process monitor is now a real top-level OS
+  window that can be dragged outside the main window or onto a second monitor, with a
+  frameless custom titlebar and a bottom-right resize grip; it shares one live process
+  model with the main window.
+
+- **Group quick commands, collapsible (#55).** Quick commands now take an optional
+  group/folder name. Leaving it empty drops the command into the implicit
+  "default" group. In the command-bar popup each group shows a header that can be
+  clicked to collapse/expand it — same behaviour as the welcome page's quick-connect
+  session groups. The manage dialog gained a "Group (optional)" field and shows the
+  grouping.
+  **快捷命令支持分组、可收起 (#55)。** 快捷命令新增可选的分组名,留空则归入隐式的
+  「default」分组。命令栏弹窗里每个分组带标题,点击即可收起/展开——和欢迎页快速连接的
+  会话分组体验一致。管理对话框新增「分组（可选）」输入框并按分组展示。
+
+- **Full quick-command management, mirroring the session panel (#55).** Right-click
+  a command — in the command-bar popup or the manage dialog — for Edit / Duplicate /
+  Delete / Move to group, and right-click a group header for Rename / Delete (empty) /
+  New group; the manage dialog also has a "+ New group" button. Same right-click
+  model as the welcome page's quick-connect sessions. Groups start **collapsed** by
+  default, and empty groups persist so you can pre-create folders.
+  **快捷命令完整管理,对齐会话面板 (#55)。** 在命令栏弹窗或管理对话框里右键命令(编辑、
+  复制、删除、移动到分组),右键分组标题(重命名、删除空分组、新建分组),管理对话框另有
+  「+ 新建分组」按钮——与欢迎页快速连接会话的右键体验一致。分组**默认收起**,空分组会被
+  保留以便预先建好文件夹。
+
+## [0.4.12] - 2026-06-20
+
+### Fixed / 修复
+
+- **macOS 26 blank text — switch the default CJK UI font to one femtovg can render
+  (#129, #108).** Root cause finally pinned: on some macOS 26 machines femtovg
+  cannot rasterize the *modern* system CJK fonts (PingFang SC, Hiragino) — fontdb
+  finds them but every glyph comes out blank — while the older Heiti/STHeiti/Songti
+  faces render perfectly (verified per-font on an M2 / macOS 26). It was never the
+  renderer (0.4.11's femtovg revert alone didn't help) nor font *loading* (fontdb
+  loaded 900+ faces). The UI now prefers the reliably-rendering "Heiti SC" (a clean
+  sans-serif that ships on every macOS), with STHeiti/Songti as further fallbacks
+  and the embedded "Meatshell Mono" as a last resort so the window is never blank.
+  A `MEATSHELL_UI_FONT="<family>"` env var can force any family without a rebuild.
+  **修复 macOS 26 文字全白——默认中文界面字体改用 femtovg 能渲染的字体 (#129, #108)。**
+  根因最终定位:部分 macOS 26 机器上 femtovg 无法栅格化*新版*系统中文字体(PingFang
+  SC、Hiragino)——fontdb 能找到它们,但每个字形都画成空白;而老字体
+  Heiti/STHeiti/Songti 渲染完全正常(已在 M2 / macOS 26 上逐字体实测)。既不是渲染器
+  (0.4.11 单独退回 femtovg 没用),也不是字体*加载*(fontdb 加载了 900+ 个 face)。
+  界面现在优先用稳定渲染的「Heiti SC」(所有 macOS 自带的干净黑体),STHeiti/Songti
+  作为后备,内置「Meatshell Mono」兜底,确保窗口永不全白。可用环境变量
+  `MEATSHELL_UI_FONT="<字体名>"` 免重编强制指定任意字体。
+
+## [0.4.11] - 2026-06-20
+
+### Fixed / 修复
+
+- **macOS text-invisible regression — renderer no longer force-switched (#129, #108).**
+  0.4.10 force-set the Skia renderer on macOS to work around femtovg failing to
+  render text on macOS 26 (#108). That shipped unverified and broke a *different*
+  set of Macs (Apple Silicon, macOS 26.5): Skia could not resolve the "PingFang SC"
+  UI font, so all text vanished there instead (icons survived because they use an
+  embedded font). The default now stays femtovg (known-good for the majority);
+  Skia is still compiled in on macOS and can be opted into at launch with
+  `SLINT_BACKEND=winit-skia` for machines where femtovg fails.
+  **修复 macOS 文本全部消失的回退问题——不再强制切换渲染器 (#129, #108)。** 0.4.10 为
+  绕过 macOS 26 上 femtovg 取字失败(#108),在 macOS 强制改用 Skia 渲染器;该改动
+  未经真机验证就发布,反而弄坏了另一批 Mac(Apple Silicon / macOS 26.5):Skia 无法
+  解析「PingFang SC」界面字体,导致这些机器上文字全部消失(图标因使用内嵌字体而正常)。
+  现默认改回 femtovg(对绝大多数机器正常);macOS 仍编译 Skia,femtovg 失效的机器可在
+  启动时用 `SLINT_BACKEND=winit-skia` 手动启用。
+
+### Added / 新增
+
+- **Cancel an in-progress upload, with remote cleanup (#100).** Uploads can now be
+  cancelled like downloads; cancelling removes the half-written file on the remote
+  so no partial junk is left behind.
+  **上传也支持取消并清理远端半成品 (#100)。** 上传可像下载一样取消;取消会删除远端已
+  写入的半成品文件,服务端不留垃圾。
+
+- **Sponsor / donation link in the README.** Added a WeChat sponsor QR for anyone
+  who'd like to support development.
+  **README 增加赞助/捐赠入口。** 加入微信赞助二维码,欢迎支持项目开发。
+
+### Changed / 优化
+
+- **Silenced ICU4X segmentation-data log noise.** Suppressed the spurious ICU4X
+  data-error warnings so they no longer clutter the log / error.log.
+  **屏蔽 ICU4X 段落数据噪音日志。** 抑制无意义的 ICU4X data-error 警告,不再污染日志
+  与 error.log。
+
+## [0.4.10] - 2026-06-19
+
+### Added / 新增
+
+- **SFTP multi-select with one-archive download (#100).** Check multiple files in
+  the SFTP panel and download them together: the selection is packed into a single
+  `tar` on the remote (named after the first item, e.g. `11等文件.tar`), pulled in
+  one transfer, then the temp is removed. Any download action (right-click, row,
+  toolbar) packs the whole checked set when 2+ are checked; a single selection
+  downloads as a plain file. Batch delete is also supported, and an empty folder
+  is reported instead of creating an empty local directory.
+  **SFTP 文件多选 + 打包下载 (#100)。** 在 SFTP 面板勾选多个文件即可一起下载:选中
+  项在远端打包成单个 `tar`(以第一个文件命名,如 `11等文件.tar`),一次性下载后删除
+  临时包。勾选 ≥2 项时,任意下载动作(右键/行内/工具栏)都打包整组;单选则按普通
+  文件下载。同时支持批量删除;下载空文件夹会给出提示而非创建空目录。
+
+- **Cancel an in-progress transfer (#100).** Each transfer row shows a cancel
+  button while active or preparing; cancelling removes the partial local file and,
+  for archive downloads, the remote temp archive — no junk left on either side.
+  **可取消进行中的传输 (#100)。** 传输记录每行在下载中/准备中时显示取消按钮;取消会
+  删除本地半成品文件,打包下载还会删除远端临时包,本地与服务端都不留垃圾。
+
+- **Name port-forward rules (#100).** Port-forward rules can be given an optional
+  name so they're easy to tell apart in the list.
+  **端口转发规则可命名 (#100)。** 转发规则可设置可选名称,便于在列表中区分。
+
+- **Global UI scale setting (#100 #117 #118).** A scale control in Interface
+  settings zooms the whole UI (fonts, spacing, radii) from 80% to 200%.
+  **界面整体缩放设置 (#100 #117 #118)。** 界面设置新增缩放控件,可将整个界面(字体、
+  间距、圆角)从 80% 到 200% 缩放。
+
+### Changed / 优化
+
+- **Much faster downloads (#100).** Downloads now use a dedicated, pipelined SFTP
+  channel that keeps many READ requests in flight at once (like uploads already
+  did), hiding round-trip latency — large files and archive bundles download
+  noticeably faster.
+  **下载大幅提速 (#100)。** 下载改用专用、流水线化的 SFTP 通道,多个读请求并发在途
+  (与上传一致),掩盖往返延迟 —— 大文件和打包包下载明显更快。
+
+- **Switch directories during transfers.** SFTP transfers run on their own task,
+  so listing and changing directories stays responsive while files move.
+  **传输时仍可切换目录。** SFTP 传输在独立任务上运行,文件传输期间列目录、切换目录
+  依然流畅。
+
+### Fixed / 修复
+
+- **macOS 26 (Tahoe): all UI text invisible (#108).** The default femtovg renderer
+  failed CoreText font lookup on macOS 26, blanking every glyph including the
+  embedded mono font. macOS now uses the Skia renderer (Windows/Linux unchanged).
+  **macOS 26 (Tahoe) 界面文本全部消失 (#108)。** 默认 femtovg 渲染器在 macOS 26 上
+  取字失败,所有文字(含内嵌等宽字体)消失。macOS 现改用 Skia 渲染器(Windows/Linux
+  不变)。
+
+- **Welcome session list now scrolls (#116).** When there are more sessions than
+  fit, the welcome screen's session list scrolls instead of clipping.
+  **欢迎页会话列表可滚动 (#116)。** 会话过多时,欢迎页的会话列表可滚动,不再被裁切。
+
+## [0.4.9] - 2026-06-19
+
+### Added / 新增
+
+- **Searchable command-history dropdown (#101).** The command-history list is now
+  filterable — type in the search box to narrow entries instantly, then click or
+  press Enter to run the match.
+  **命令历史下拉支持搜索 (#101)。** 历史列表新增搜索框,输入关键字即可实时过滤,
+  点击或回车直接执行匹配项。
+
+- **Readline keys in the command box + shortcuts reference (#103).** The command
+  box now honours common readline bindings (Ctrl+A/E/K/U/W, Alt+B/F/D/Backspace,
+  etc.) for fast inline editing; a keyboard-shortcuts reference panel is also
+  added so users can discover available bindings at a glance.
+  **命令输入框支持 Readline 快捷键 + 快捷键参考 (#103)。** 命令框现在支持常见
+  readline 绑定(Ctrl+A/E/K/U/W、Alt+B/F/D/Backspace 等)进行快速行内编辑;
+  另加快捷键参考面板,方便用户一览可用组合键。
+
+- **Scroll arrows when tabs overflow (#122).** When open tabs exceed the tab bar
+  width, left/right arrow buttons appear so users can scroll through the hidden
+  tabs instead of losing access to them.
+  **标签溢出时显示滚动箭头 (#122)。** 当打开的标签超出标签栏宽度时,左右箭头
+  按钮出现,可滚动查看被遮挡的标签。
+
+- **Slim scrollbar for the terminal output area (#103).** The terminal's vertical
+  scrollbar is now a thin, auto-hiding overlay that doesn't eat into the column
+  count, giving more screen real estate to the actual output.
+  **终端输出区窄滚动条 (#103)。** 终端纵向滚动条改为细窄的自动隐藏覆盖层,
+  不再占用列数,把更多屏幕空间留给实际输出。
+
+### Fixed / 修复
+
+- **Preserve the MOTD/banner when hiding the injected setup line (#98).** The
+  previous approach stripped too aggressively and could swallow the server's
+  MOTD/banner that arrives before the shell prompt; the matcher now only discards
+  the single injected line, leaving the banner intact.
+  **隐藏注入设置行时保留 MOTD/横幅 (#98)。** 之前的做法剥离过度,会把 shell 提示符
+  之前到达的服务器 MOTD/横幅一并吞掉;现在匹配器仅丢弃注入的那一行,横幅原样保留。
+
+- **Reserve space for toolbar icons + scroll overflowing tabs (#122).** The tab
+  bar now leaves a right margin so the last tab's close button isn't hidden
+  behind the toolbar icons; tabs that still overflow are scrollable.
+  **为工具栏图标预留空间 + 溢出标签可滚动 (#122)。** 标签栏右侧留出余量,
+  最后一个标签的关闭按钮不再被工具栏图标遮挡;仍然溢出的标签可滚动查看。
+
 ## [0.4.8] - 2026-06-18
 
 ### Added / 新增

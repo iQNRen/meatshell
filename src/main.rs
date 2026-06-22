@@ -20,6 +20,22 @@ mod zmodem;
 mod webdav;
 
 fn main() -> anyhow::Result<()> {
+    // macOS renderer is left at Slint's default (femtovg) and is NOT forced.
+    //
+    // History: 0.4.10 force-set SLINT_BACKEND=winit-skia to work around femtovg's
+    // CoreText font lookup failing on macOS 26 / Tahoe (all text vanished, #108).
+    // That fix shipped without on-device verification and turned out to *break* a
+    // different set of Macs (Apple Silicon M5 / 26.5): Skia couldn't resolve the
+    // "PingFang SC" UI font and all text vanished there instead (#129). Icons
+    // survived in both cases because Material Icons is an embedded font.
+    //
+    // Neither renderer works for every macOS machine, so we no longer pick for the
+    // user: femtovg is the known-good default for the majority. Users for whom
+    // femtovg fails to render text (e.g. #108) can opt into Skia at launch with
+    //     SLINT_BACKEND=winit-skia
+    // The renderer-skia feature is still compiled in on macOS (see Cargo.toml) so
+    // that override is available without a rebuild.
+
     init_tracing();
 
     // ── IME policy ───────────────────────────────────────────────────────────
@@ -44,12 +60,30 @@ fn main() -> anyhow::Result<()> {
 /// `error.log` file at WARN and above so users can send diagnostics — e.g. a
 /// bastion disconnect reason — without setting RUST_LOG (#86).
 fn init_tracing() {
-    use tracing_subscriber::filter::LevelFilter;
     use tracing_subscriber::prelude::*;
     use tracing_subscriber::{fmt, EnvFilter};
 
-    let env_filter =
-        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    // Third-party noise routed through `log` → tracing: ICU4X data-error warnings
+    // (icu_provider dependency) and fontdb's "malformed font" warning for fonts it
+    // can't parse but harmlessly skips (e.g. Windows' mstmc.ttf). Silence on every
+    // layer; keep fontdb at `error` so genuine failures still surface.
+    fn quiet_noise(mut f: EnvFilter) -> EnvFilter {
+        for d in [
+            "icu_provider=off",
+            "icu_segmenter=off",
+            "icu_normalizer=off",
+            "fontdb=error",
+        ] {
+            if let Ok(dir) = d.parse() {
+                f = f.add_directive(dir);
+            }
+        }
+        f
+    }
+
+    let env_filter = quiet_noise(
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+    );
     let stderr_layer = fmt::layer()
         .with_writer(std::io::stderr)
         .with_filter(env_filter);
@@ -61,7 +95,7 @@ fn init_tracing() {
             fmt::layer()
                 .with_ansi(false)
                 .with_writer(errlog::CappedWriter::new(cf))
-                .with_filter(LevelFilter::WARN)
+                .with_filter(quiet_noise(EnvFilter::new("warn")))
         });
 
     tracing_subscriber::registry()
