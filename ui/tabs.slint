@@ -14,7 +14,7 @@ component SingleTab inherits Rectangle {
     in property <bool> active;
     callback selected();
     callback closed();
-    callback right-clicked();  // 右键点击
+    callback right-clicked(length, length);  // (x, y) 鼠标坐标
 
     height: 30px;
     min-width: 100px;          // 缩短：原 120px，短名称（如 "pve"）时更紧凑
@@ -32,7 +32,7 @@ component SingleTab inherits Rectangle {
         clicked => { root.selected(); }
         pointer-event(event) => {
             if event.button == PointerEventButton.right && event.kind == PointerEventKind.up {
-                root.right-clicked();
+                root.right-clicked(root.x + touch.mouse-x, root.y + touch.mouse-y);
             }
         }
     }
@@ -66,6 +66,7 @@ component SingleTab inherits Rectangle {
             glyph: "×";
             size: 20px;
             y: (parent.height - self.height) / 2;
+            tooltip: @tr("Close tab");
             clicked => { root.closed(); }
         }
     }
@@ -83,9 +84,9 @@ export component TabBar inherits Rectangle {
     callback close-other-tabs(string);    // 关闭其他标签
     callback close-right-tabs(string);    // 关闭右侧标签
     callback close-all-tabs();            // 关闭所有标签
+    callback duplicate-tab(string);       // 复制标签
 
     // 右键菜单状态
-    in-out property <bool> context-menu-open: false;
     in-out property <string> context-menu-tab-id: "";
     in-out property <length> context-menu-x: 0px;
     in-out property <length> context-menu-y: 0px;
@@ -102,9 +103,11 @@ export component TabBar inherits Rectangle {
             active: tab.id == root.active-id;
             selected => { root.tab-selected(tab.id); }
             closed => { root.tab-closed(tab.id); }
-            right-clicked => {
+            right-clicked(x, y) => {
                 root.context-menu-tab-id = tab.id;
-                root.context-menu-open = true;
+                root.context-menu-x = x + 8px;
+                root.context-menu-y = 0px;
+                tab-menu.show();
             }
         }
 
@@ -112,6 +115,7 @@ export component TabBar inherits Rectangle {
             glyph: "+";
             size: 28px;
             y: (parent.height - self.height) / 2;
+            tooltip: @tr("New tab");
             clicked => { root.new-tab(); }
         }
 
@@ -119,108 +123,125 @@ export component TabBar inherits Rectangle {
         Rectangle { horizontal-stretch: 1; }
     }
 
-    // 右键菜单弹出层
-    if context-menu-open : Rectangle {
-        width: parent.width;
-        height: parent.height;
-        // 点击空白关闭菜单
-        TouchArea {
-            clicked => { root.context-menu-open = false; }
-        }
-    }
-
-    if context-menu-open : Rectangle {
+    // 右键菜单弹出层（PopupWindow 确保在最顶层，不被终端内容遮挡）
+    tab-menu := PopupWindow {
         x: root.context-menu-x;
         y: root.context-menu-y;
         width: 160px;
         height: menu-col.preferred-height;
-        border-radius: Theme.radius-sm;
-        border-width: 1px;
-        border-color: Theme.border-subtle;
-        background: Theme.bg-elevated;
-        drop-shadow-blur: 8px;
-        drop-shadow-color: #00000040;
 
-        menu-col := VerticalLayout {
-            padding: 4px;
-            spacing: 2px;
+        Rectangle {
+            border-radius: Theme.radius-sm;
+            border-width: 1px;
+            border-color: Theme.border-subtle;
+            background: Theme.bg-elevated;
+            drop-shadow-blur: 8px;
+            drop-shadow-color: #00000040;
 
-            // 关闭当前标签
-            Rectangle {
-                height: 28px;
-                border-radius: Theme.radius-sm;
-                background: mi-close.has-hover ? Theme.bg-hover : transparent;
-                mi-close := TouchArea {
-                    mouse-cursor: pointer;
-                    clicked => {
-                        root.close-tab(root.context-menu-tab-id);
-                        root.context-menu-open = false;
+            menu-col := VerticalLayout {
+                padding: 4px;
+                spacing: 2px;
+
+                // 新建标签
+                Rectangle {
+                    height: 28px;
+                    border-radius: Theme.radius-sm;
+                    background: mi-new.has-hover ? Theme.bg-hover : transparent;
+                    mi-new := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.new-tab(); }
+                    }
+                    HorizontalLayout {
+                        padding-left: 10px; spacing: 8px;
+                        Text { text: "+"; color: Theme.text-secondary; font-size: 16px; font-weight: 700; vertical-alignment: center; width: 14px; }
+                        Text { text: @tr("New Tab"); color: Theme.text-primary; font-size: Theme.fs-sm; vertical-alignment: center; }
                     }
                 }
-                HorizontalLayout {
-                    padding-left: 10px; spacing: 8px;
-                    Text { text: "\u{E14C}"; font-family: "Material Icons"; color: Theme.text-secondary; font-size: 14px; vertical-alignment: center; }
-                    Text { text: @tr("Close Tab"); color: Theme.text-primary; font-size: Theme.fs-sm; vertical-alignment: center; }
-                }
-            }
 
-            // 关闭其他标签
-            Rectangle {
-                height: 28px;
-                border-radius: Theme.radius-sm;
-                background: mi-others.has-hover ? Theme.bg-hover : transparent;
-                mi-others := TouchArea {
-                    mouse-cursor: pointer;
-                    clicked => {
-                        root.close-other-tabs(root.context-menu-tab-id);
-                        root.context-menu-open = false;
+                // 复制标签
+                Rectangle {
+                    height: 28px;
+                    border-radius: Theme.radius-sm;
+                    background: mi-dup.has-hover ? Theme.bg-hover : transparent;
+                    mi-dup := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.duplicate-tab(root.context-menu-tab-id); }
+                    }
+                    HorizontalLayout {
+                        padding-left: 10px; spacing: 8px;
+                        Text { text: "\u{E148}"; font-family: "Material Icons"; color: Theme.text-secondary; font-size: 14px; vertical-alignment: center; }
+                        Text { text: @tr("Duplicate Tab"); color: Theme.text-primary; font-size: Theme.fs-sm; vertical-alignment: center; }
                     }
                 }
-                HorizontalLayout {
-                    padding-left: 10px; spacing: 8px;
-                    Text { text: "\u{E14C}"; font-family: "Material Icons"; color: Theme.text-secondary; font-size: 14px; vertical-alignment: center; }
-                    Text { text: @tr("Close Other Tabs"); color: Theme.text-primary; font-size: Theme.fs-sm; vertical-alignment: center; }
-                }
-            }
 
-            // 关闭右侧标签
-            Rectangle {
-                height: 28px;
-                border-radius: Theme.radius-sm;
-                background: mi-right.has-hover ? Theme.bg-hover : transparent;
-                mi-right := TouchArea {
-                    mouse-cursor: pointer;
-                    clicked => {
-                        root.close-right-tabs(root.context-menu-tab-id);
-                        root.context-menu-open = false;
+                // 分割线
+                Rectangle { height: 1px; background: Theme.border-subtle; }
+
+                // 关闭当前标签
+                Rectangle {
+                    height: 28px;
+                    border-radius: Theme.radius-sm;
+                    background: mi-close.has-hover ? Theme.bg-hover : transparent;
+                    mi-close := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.close-tab(root.context-menu-tab-id); }
+                    }
+                    HorizontalLayout {
+                        padding-left: 10px; spacing: 8px;
+                        Text { text: "\u{E14C}"; font-family: "Material Icons"; color: Theme.text-secondary; font-size: 14px; vertical-alignment: center; }
+                        Text { text: @tr("Close Tab"); color: Theme.text-primary; font-size: Theme.fs-sm; vertical-alignment: center; }
                     }
                 }
-                HorizontalLayout {
-                    padding-left: 10px; spacing: 8px;
-                    Text { text: "\u{E15C}"; font-family: "Material Icons"; color: Theme.text-secondary; font-size: 14px; vertical-alignment: center; }
-                    Text { text: @tr("Close Tabs to the Right"); color: Theme.text-primary; font-size: Theme.fs-sm; vertical-alignment: center; }
-                }
-            }
 
-            // 分割线
-            Rectangle { height: 1px; background: Theme.border-subtle; }
-
-            // 关闭所有标签
-            Rectangle {
-                height: 28px;
-                border-radius: Theme.radius-sm;
-                background: mi-all.has-hover ? Theme.danger.with-alpha(0.15) : transparent;
-                mi-all := TouchArea {
-                    mouse-cursor: pointer;
-                    clicked => {
-                        root.close-all-tabs();
-                        root.context-menu-open = false;
+                // 关闭其他标签
+                Rectangle {
+                    height: 28px;
+                    border-radius: Theme.radius-sm;
+                    background: mi-others.has-hover ? Theme.bg-hover : transparent;
+                    mi-others := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.close-other-tabs(root.context-menu-tab-id); }
+                    }
+                    HorizontalLayout {
+                        padding-left: 10px; spacing: 8px;
+                        Text { text: "\u{E14C}"; font-family: "Material Icons"; color: Theme.text-secondary; font-size: 14px; vertical-alignment: center; }
+                        Text { text: @tr("Close Other Tabs"); color: Theme.text-primary; font-size: Theme.fs-sm; vertical-alignment: center; }
                     }
                 }
-                HorizontalLayout {
-                    padding-left: 10px; spacing: 8px;
-                    Text { text: "\u{E14C}"; font-family: "Material Icons"; color: mi-all.has-hover ? Theme.danger : Theme.text-secondary; font-size: 14px; vertical-alignment: center; }
-                    Text { text: @tr("Close All Tabs"); color: mi-all.has-hover ? Theme.danger : Theme.text-primary; font-size: Theme.fs-sm; vertical-alignment: center; }
+
+                // 关闭右侧标签
+                Rectangle {
+                    height: 28px;
+                    border-radius: Theme.radius-sm;
+                    background: mi-right.has-hover ? Theme.bg-hover : transparent;
+                    mi-right := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.close-right-tabs(root.context-menu-tab-id); }
+                    }
+                    HorizontalLayout {
+                        padding-left: 10px; spacing: 8px;
+                        Text { text: "\u{E15C}"; font-family: "Material Icons"; color: Theme.text-secondary; font-size: 14px; vertical-alignment: center; }
+                        Text { text: @tr("Close Tabs to the Right"); color: Theme.text-primary; font-size: Theme.fs-sm; vertical-alignment: center; }
+                    }
+                }
+
+                // 分割线
+                Rectangle { height: 1px; background: Theme.border-subtle; }
+
+                // 关闭所有标签
+                Rectangle {
+                    height: 28px;
+                    border-radius: Theme.radius-sm;
+                    background: mi-all.has-hover ? Theme.danger.with-alpha(0.15) : transparent;
+                    mi-all := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.close-all-tabs(); }
+                    }
+                    HorizontalLayout {
+                        padding-left: 10px; spacing: 8px;
+                        Text { text: "\u{E14C}"; font-family: "Material Icons"; color: mi-all.has-hover ? Theme.danger : Theme.text-secondary; font-size: 14px; vertical-alignment: center; }
+                        Text { text: @tr("Close All Tabs"); color: mi-all.has-hover ? Theme.danger : Theme.text-primary; font-size: Theme.fs-sm; vertical-alignment: center; }
+                    }
                 }
             }
         }

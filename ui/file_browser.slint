@@ -85,6 +85,27 @@ export component FileBrowser inherits Rectangle {
                         horizontal-alignment: center;
                         vertical-alignment: center;
                     }
+                    if hist-ta.has-hover : Rectangle {
+                        y: -1 * (parent.height + 5px);
+                        x: parent.width - self.width;
+                        width: hist-tip.preferred-width + 16px;
+                        height: 22px;
+                        background: Theme.bg-elevated;
+                        border-radius: Theme.radius-sm;
+                        border-width: 1px;
+                        border-color: Theme.border-strong;
+                        drop-shadow-blur: 8px;
+                        drop-shadow-color: #00000070;
+                        hist-tip := Text {
+                            text: root.lang-en ? "History" : "历史记录";
+                            color: Theme.text-primary;
+                            font-size: Theme.fs-xs;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                            width: parent.width;
+                            height: parent.height;
+                        }
+                    }
 
                     his-popup := PopupWindow {
                         x: 0; y: parent.height + 2px;
@@ -148,6 +169,27 @@ export component FileBrowser inherits Rectangle {
                         font-size: 12px;
                         horizontal-alignment: center; vertical-alignment: center;
                     }
+                    if back-ta.has-hover : Rectangle {
+                        y: -1 * (parent.height + 5px);
+                        x: parent.width - self.width;
+                        width: back-tip.preferred-width + 16px;
+                        height: 22px;
+                        background: Theme.bg-elevated;
+                        border-radius: Theme.radius-sm;
+                        border-width: 1px;
+                        border-color: Theme.border-strong;
+                        drop-shadow-blur: 8px;
+                        drop-shadow-color: #00000070;
+                        back-tip := Text {
+                            text: root.lang-en ? "Back" : "后退";
+                            color: Theme.text-primary;
+                            font-size: Theme.fs-xs;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                            width: parent.width;
+                            height: parent.height;
+                        }
+                    }
                 }
 
                 Rectangle {
@@ -165,6 +207,27 @@ export component FileBrowser inherits Rectangle {
                         font-size: 12px;
                         horizontal-alignment: center; vertical-alignment: center;
                     }
+                    if up-ta.has-hover : Rectangle {
+                        y: -1 * (parent.height + 5px);
+                        x: parent.width - self.width;
+                        width: up-tip.preferred-width + 16px;
+                        height: 22px;
+                        background: Theme.bg-elevated;
+                        border-radius: Theme.radius-sm;
+                        border-width: 1px;
+                        border-color: Theme.border-strong;
+                        drop-shadow-blur: 8px;
+                        drop-shadow-color: #00000070;
+                        up-tip := Text {
+                            text: root.lang-en ? "Parent folder" : "上级目录";
+                            color: Theme.text-primary;
+                            font-size: Theme.fs-xs;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                            width: parent.width;
+                            height: parent.height;
+                        }
+                    }
                 }
 
                 Rectangle {
@@ -181,6 +244,27 @@ export component FileBrowser inherits Rectangle {
                         color: Theme.text-secondary;
                         font-size: 12px;
                         horizontal-alignment: center; vertical-alignment: center;
+                    }
+                    if ref-ta.has-hover : Rectangle {
+                        y: -1 * (parent.height + 5px);
+                        x: parent.width - self.width;
+                        width: ref-tip.preferred-width + 16px;
+                        height: 22px;
+                        background: Theme.bg-elevated;
+                        border-radius: Theme.radius-sm;
+                        border-width: 1px;
+                        border-color: Theme.border-strong;
+                        drop-shadow-blur: 8px;
+                        drop-shadow-color: #00000070;
+                        ref-tip := Text {
+                            text: root.lang-en ? "Refresh" : "刷新";
+                            color: Theme.text-primary;
+                            font-size: Theme.fs-xs;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                            width: parent.width;
+                            height: parent.height;
+                        }
                     }
                 }
 

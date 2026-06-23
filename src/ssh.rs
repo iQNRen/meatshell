@@ -145,7 +145,7 @@ fn extract_osc7_end(text: &str) -> Option<(String, usize)> {
     None
 }
 
-/// Find a meatshell command-capture sequence (`ESC ] 697 ; <command> BEL|ST`)
+/// Find a rusterm command-capture sequence (`ESC ] 697 ; <command> BEL|ST`)
 /// emitted by the shell hook (#113). Returns the command text and the byte
 /// range of the whole escape sequence, so the caller can strip it before the
 /// text is rendered. An incomplete sequence (terminator not yet received)
@@ -735,13 +735,13 @@ async fn run_session(
         match handle.tcpip_forward(bind.clone(), f.bind_port as u32).await {
             Ok(_) => {
                 let _ = events.send(SessionEvent::Output(format!(
-                    "\r\n[meatshell] -R {bind}:{} → {}:{}\r\n",
+                    "\r\n[rusterm] -R {bind}:{} → {}:{}\r\n",
                     f.bind_port, f.host, f.host_port
                 )));
             }
             Err(e) => {
                 let _ = events.send(SessionEvent::Output(format!(
-                    "\r\n[meatshell] -R {bind}:{} 请求失败 / request failed: {e}\r\n",
+                    "\r\n[rusterm] -R {bind}:{} 请求失败 / request failed: {e}\r\n",
                     f.bind_port
                 )));
             }
@@ -825,7 +825,7 @@ async fn run_session(
                                     tracing::warn!("zmodem receive failed: {e:#}");
                                     let _ = channel.data(&ZMODEM_CANCEL[..]).await;
                                     let _ = events.send(SessionEvent::Output(format!(
-                                        "\r\n[meatshell] {}: {e}\r\n",
+                                        "\r\n[rusterm] {}: {e}\r\n",
                                         t("ZMODEM 接收失败,已取消", "ZMODEM receive failed; cancelled")
                                     ).into()));
                                 }
@@ -1378,7 +1378,7 @@ impl Handler for ClientHandler {
                 }
                 Err(e) => {
                     let _ = events.send(SessionEvent::Output(format!(
-                        "\r\n[meatshell] -R {host}:{port} 连接失败 / connect failed: {e}\r\n"
+                        "\r\n[rusterm] -R {host}:{port} 连接失败 / connect failed: {e}\r\n"
                     )));
                 }
             }

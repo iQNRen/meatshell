@@ -89,7 +89,7 @@ use crate::ssh::{
     format_mtime, format_size, spawn_session, ProcInfo, SessionCommand, SessionEvent,
     SessionHandle,
 };
-use crate::system::{format_bytes_per_sec, format_mem, SystemSampler, SystemSnapshot};
+use crate::system::{format_bytes_per_sec, format_cpu_detail, format_mem, SystemSampler, SystemSnapshot};
 
 type SftpHandles = Arc<Mutex<HashMap<String, SftpHandle>>>;
 /// Per-tab flag: once the user explicitly navigates via the SFTP tree or
@@ -323,7 +323,7 @@ pub fn run() -> Result<()> {
     // failed to register "PingFang SC", so the UI default font resolved to nothing
     // and *all* text vanished (#129) — icons survived only because they use an
     // embedded font. Instead probe what fontdb actually loaded and pick the first
-    // resolvable CJK family, falling back to the embedded "Meatshell Mono" so the
+    // resolvable CJK family, falling back to the embedded "rusterm Mono" so the
     // window is never fully blank even when the system font DB is unreadable.
     window.set_ui_font_family(resolve_ui_font_family());
     // Populate the Interface font picker with installed monospace families.
@@ -431,6 +431,7 @@ pub fn run() -> Result<()> {
         &store.borrow(),
         &all_quick_group_names(&store.borrow()),
     ));
+    window.set_quick_groups(build_group_names(&store.borrow()));
     window.set_command_history(history_model(&store.borrow()));
 
     // Interface setting: SFTP follows the terminal's cd. The shell event pumps
@@ -2321,6 +2322,24 @@ fn wire_session_callbacks(
             start_session_in_tab(&tab_id, session, &ctx);
         });
     }
+
+    // 右键菜单：复制标签（查找现有标签的 session_id，复用 connect_session 流程）
+    {
+        let weak = window.as_weak();
+        let tab_statuses = tab_statuses.clone();
+        window.on_duplicate_tab(move |tab_id: SharedString| {
+            let sid = tab_statuses
+                .lock()
+                .unwrap()
+                .get(&tab_id.to_string())
+                .map(|ts| ts.session_id.clone());
+            if let Some(w) = weak.upgrade() {
+                if let Some(sid) = sid {
+                    w.invoke_connect_session(sid.into());
+                }
+            }
+        });
+    }
 }
 
 type NetHist = Arc<Mutex<Vec<f32>>>;
@@ -2640,7 +2659,7 @@ fn quick_cmd_model(
     let mut rows: Vec<QuickCmd> = Vec::new();
     for group in &groups {
         let is_collapsed = collapsed_groups.contains(group);
-        let members: Vec<(usize, &crate::config::QuickCommand)> = cmds
+        let mut members: Vec<(usize, &crate::config::QuickCommand)> = cmds
             .iter()
             .enumerate()
             .filter(|(_, c)| {
@@ -2652,6 +2671,8 @@ fn quick_cmd_model(
                 }
             })
             .collect();
+        // Sort commands by name within each group (#168).
+        members.sort_by(|a, b| a.1.name.to_lowercase().cmp(&b.1.name.to_lowercase()));
         if members.is_empty() {
             // Header-only placeholder for an empty group (orig_index -1) so it can
             // still be renamed / deleted, matching empty session folders.
@@ -2677,6 +2698,30 @@ fn quick_cmd_model(
         }
     }
     ModelRc::from(Rc::new(VecModel::from(rows)))
+}
+
+/// Build the list of quick-command group names for the management-dialog
+/// ComboBox.  "default" = ungrouped; the add/save callbacks map it back to "".
+fn build_group_names(store: &ConfigStore) -> ModelRc<SharedString> {
+    let cmds = store.quick_commands();
+    let mut names: Vec<String> = vec!["default".to_string()];
+    for cmd in cmds {
+        let g = cmd.group.trim().to_string();
+        if !g.is_empty() && !names.contains(&g) {
+            names.push(g);
+        }
+    }
+    for g in store.quick_groups() {
+        let g = g.trim().to_string();
+        if !g.is_empty() && !names.contains(&g) {
+            names.push(g);
+        }
+    }
+    names.sort();
+    names.dedup();
+    ModelRc::from(Rc::new(VecModel::from(
+        names.into_iter().map(SharedString::from).collect::<Vec<_>>(),
+    )))
 }
 
 /// Build the port-forward list model for the session dialog (#56). Each row is
@@ -2888,17 +2933,11 @@ fn refresh_sidebar(
     let show_local_res = |win: &AppWindow| {
         win.set_resource_title(t("本机资源", "Local resources").into());
         win.set_cpu_percent(snap.cpu_percent);
+        win.set_cpu_detail(format_cpu_detail(snap.cpu_percent, snap.cpu_count).into());
         win.set_mem_percent(snap.mem_percent);
         win.set_swap_percent(snap.swap_percent);
         win.set_mem_detail(format_mem(snap.mem_used_mib, snap.mem_total_mib).into());
         win.set_swap_detail(format_mem(snap.swap_used_mib, snap.swap_total_mib).into());
-    };
-    let clear_stats = |win: &AppWindow| {
-        win.set_cpu_percent(0.0);
-        win.set_mem_percent(0.0);
-        win.set_swap_percent(0.0);
-        win.set_mem_detail("".into());
-        win.set_swap_detail("".into());
     };
 
     // Process monitor (#23) lives in a shared model (the AppWindow and the
@@ -2935,6 +2974,7 @@ fn refresh_sidebar(
             win.set_host_ip(ip.into());
             win.set_resource_title(t("服务器资源", "Server resources").into());
             win.set_cpu_percent(st.cpu);
+            win.set_cpu_detail(format!("{:.0}%", st.cpu * 100.0).into());
             win.set_mem_percent(pct(st.mem_used_kib, st.mem_total_kib));
             win.set_swap_percent(pct(st.swap_used_kib, st.swap_total_kib));
             win.set_mem_detail(
@@ -2956,22 +2996,20 @@ fn refresh_sidebar(
             win.set_proc_available(true);
             set_procs(win, &st.procs);
         }
-        // Disconnected / timed-out session.
+        // Disconnected / timed-out session — show local resources.
         Some(st) if st.state == 2 => {
             win.set_conn_state(2);
             win.set_connection_state(format!("{} {}", st.host, t("已断开", "disconnected")).into());
-            win.set_host_ip("".into());  // 断开后清空 IP
-            win.set_resource_title(t("服务器资源", "Server resources").into());
-            clear_stats(win);
+            win.set_host_ip("".into());
+            show_local_res(win);
             set_top_local(win);
         }
-        // Still connecting.
+        // Still connecting — show local resources.
         Some(st) => {
             win.set_conn_state(0);
             win.set_connection_state(format!("{} {}", t("连接中", "Connecting"), st.host).into());
-            win.set_host_ip("".into());  // 连接中清空 IP
-            win.set_resource_title(t("服务器资源", "Server resources").into());
-            clear_stats(win);
+            win.set_host_ip("".into());
+            show_local_res(win);
             set_top_local(win);
         }
         // Welcome tab (or unknown) → local machine top + bottom.
@@ -4534,6 +4572,7 @@ fn wire_key_input(
                 let name = name.trim().to_string();
                 let command = command.to_string();
                 let group = group.trim().to_string();
+                let group = if group == "default" { String::new() } else { group };
                 if name.is_empty() || command.trim().is_empty() {
                     return;
                 }
@@ -4550,6 +4589,7 @@ fn wire_key_input(
                 }
                 if let Some(w) = weak.upgrade() {
                     w.set_quick_commands(quick_cmd_model(&store_rc.borrow(), &collapsed.borrow()));
+                    w.set_quick_groups(build_group_names(&store_rc.borrow()));
                 }
             },
         );
@@ -4571,6 +4611,7 @@ fn wire_key_input(
             }
             if let Some(w) = weak.upgrade() {
                 w.set_quick_commands(quick_cmd_model(&store_rc.borrow(), &collapsed.borrow()));
+                w.set_quick_groups(build_group_names(&store_rc.borrow()));
             }
         });
     }
@@ -4601,7 +4642,9 @@ fn wire_key_input(
             if let (Some(c), Some(w)) = (cmd, weak.upgrade()) {
                 w.set_qcm_name(c.name.into());
                 w.set_qcm_command(c.command.into());
-                w.set_qcm_group(c.group.into());
+                w.set_qcm_group(
+                    if c.group.is_empty() { "default".into() } else { c.group.into() },
+                );
                 w.set_qcm_edit_index(index);
                 w.set_quick_cmd_manage_open(true);
             }
@@ -4617,6 +4660,7 @@ fn wire_key_input(
                 let name = name.trim().to_string();
                 let command = command.to_string();
                 let group = group.trim().to_string();
+                let group = if group == "default" { String::new() } else { group };
                 if name.is_empty() || command.trim().is_empty() {
                     return;
                 }
@@ -4634,6 +4678,7 @@ fn wire_key_input(
                 }
                 if let Some(w) = weak.upgrade() {
                     w.set_quick_commands(quick_cmd_model(&store_rc.borrow(), &collapsed.borrow()));
+                    w.set_quick_groups(build_group_names(&store_rc.borrow()));
                 }
             },
         );
@@ -4660,6 +4705,7 @@ fn wire_key_input(
             }
             if let Some(w) = weak.upgrade() {
                 w.set_quick_commands(quick_cmd_model(&store_rc.borrow(), &collapsed.borrow()));
+                w.set_quick_groups(build_group_names(&store_rc.borrow()));
             }
         });
     }
@@ -4682,6 +4728,7 @@ fn wire_key_input(
             }
             if let Some(w) = weak.upgrade() {
                 w.set_quick_commands(quick_cmd_model(&store_rc.borrow(), &collapsed.borrow()));
+                w.set_quick_groups(build_group_names(&store_rc.borrow()));
             }
         });
     }
@@ -4702,6 +4749,7 @@ fn wire_key_input(
             }
             if let Some(w) = weak.upgrade() {
                 w.set_quick_commands(quick_cmd_model(&store_rc.borrow(), &collapsed.borrow()));
+                w.set_quick_groups(build_group_names(&store_rc.borrow()));
             }
         });
     }
@@ -4718,6 +4766,7 @@ fn wire_key_input(
             }
             if let Some(w) = weak.upgrade() {
                 w.set_quick_commands(quick_cmd_model(&store_rc.borrow(), &collapsed.borrow()));
+                w.set_quick_groups(build_group_names(&store_rc.borrow()));
             }
         });
     }
@@ -5576,7 +5625,7 @@ fn clipboard_set_text(text: String) {
 /// Enumerate installed monospace font families for the Interface font picker.
 /// Terminals want fixed-width fonts, so non-monospace families are filtered out.
 /// Choose a UI font family that fontdb can actually resolve, falling back to the
-/// embedded "Meatshell Mono" when the system font database is empty/unreadable.
+/// embedded "rusterm Mono" when the system font database is empty/unreadable.
 ///
 /// macOS 26 (Tahoe) shipped a system where fontdb couldn't register the named
 /// CJK font ("PingFang SC"), so hard-coding that name made the whole UI render
@@ -5590,12 +5639,12 @@ fn resolve_ui_font_family() -> slint::SharedString {
     use fontdb::{Database, Family, Query, Stretch, Style, Weight};
 
     // Diagnostic / escape hatch (#129): force a specific UI font without a rebuild.
-    // e.g. MEATSHELL_UI_FONT="Meatshell Mono" to test whether the embedded font
+    // e.g. rusterm_UI_FONT="rusterm Mono" to test whether the embedded font
     // renders when system fonts don't. Empty value is ignored.
-    if let Some(f) = std::env::var_os("MEATSHELL_UI_FONT") {
+    if let Some(f) = std::env::var_os("rusterm_UI_FONT") {
         let f = f.to_string_lossy().into_owned();
         if !f.trim().is_empty() {
-            tracing::debug!(font = %f, "ui-font: overridden via MEATSHELL_UI_FONT");
+            tracing::debug!(font = %f, "ui-font: overridden via rusterm_UI_FONT");
             return f.into();
         }
     }
@@ -5613,7 +5662,7 @@ fn resolve_ui_font_family() -> slint::SharedString {
     // ship on every macOS, so we prefer them and keep PingFang only as a late
     // fallback. (Verified on an M2/macOS 26: Heiti SC/STHeiti/Songti SC render,
     // PingFang/Hiragino don't.) Power users can still force one via
-    // MEATSHELL_UI_FONT. Heiti SC is a clean sans-serif (better for UI than the
+    // rusterm_UI_FONT. Heiti SC is a clean sans-serif (better for UI than the
     // serif Songti), so it leads.
     #[cfg(target_os = "macos")]
     let candidates: &[&str] = &[
@@ -5654,8 +5703,8 @@ fn resolve_ui_font_family() -> slint::SharedString {
             "ui-font: no preferred CJK font resolved; listing available families");
     }
     tracing::warn!(faces = face_count,
-        "ui-font: falling back to embedded 'Meatshell Mono' (system fonts unusable, #129)");
-    "Meatshell Mono".into()
+        "ui-font: falling back to embedded 'rusterm Mono' (system fonts unusable, #129)");
+    "rusterm Mono".into()
 }
 
 fn system_monospace_fonts() -> Vec<slint::SharedString> {

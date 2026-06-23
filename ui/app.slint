@@ -2,7 +2,7 @@
 // Embedding means Windows / Linux / macOS all render the same glyphs without
 // relying on Consolas / Segoe MDL2 Assets being installed.
 //
-// "Meatshell Mono" is Cascadia Mono re-named to a unique family (#114): full
+// "rusterm Mono" is Cascadia Mono re-named to a unique family (#114): full
 //   box-drawing + block-elements + braille (needed by htop/btop graphs). The
 //   original "Cascadia Mono" name collides with the system font family, so on a
 //   machine without Cascadia installed (e.g. Win11 Home) the OS font matcher
@@ -10,8 +10,8 @@
 //   name (like Material Icons) can't be shadowed, so the embedded font is always
 //   used.
 // Material Icons: open-source icon font replacing Windows-only Segoe MDL2 Assets.
-import "fonts/MeatshellMono-Regular.ttf";
-import "fonts/MeatshellMono-Bold.ttf";
+import "fonts/rustermMono-Regular.ttf";
+import "fonts/rustermMono-Bold.ttf";
 import "fonts/MaterialIcons-Regular.ttf";
 
 import { Theme } from "theme.slint";
@@ -205,6 +205,7 @@ export component AppWindow inherits Window {
     in property <int> conn-state;                       // 0 gray / 1 green / 2 yellow
     in property <string> resource-title: @tr("Local resources");    // @tr("Local resources") | @tr("Server resources")
     in property <float> cpu-percent;
+    in property <string> cpu-detail;
     in property <float> mem-percent;
     in property <float> swap-percent;
     in property <string> mem-detail;
@@ -285,6 +286,7 @@ export component AppWindow inherits Window {
     in property <[ProcRow]> proc-list;       // top remote processes by CPU
     // Command bar (#55): quick commands + history, fed from Rust.
     in property <[QuickCmd]> quick-commands;
+    in property <[string]> quick-groups;              // group names for manage dialog
     in property <[string]> command-history;          // oldest first (newest last, #113)
     in property <[string]> history-view;             // filtered dropdown list (#101)
     callback run-command(string /* tab-id */, string /* cmd */, bool /* to-all */);
@@ -411,7 +413,7 @@ export component AppWindow inherits Window {
     callback set-language(string);           // switch UI language ("zh" / "en")
 
     // --- FileBrowser (unified local/remote, sidebar or bottom) --------------
-    in-out property <string> fb-position: "sidebar";
+    in-out property <string> fb-position: "bottom";
     in property <string> fb-path: "/";
     in property <[FileEntry]> fb-entries;
     in property <[string]> fb-history: [];
@@ -587,6 +589,7 @@ export component AppWindow inherits Window {
     callback close-other-tabs(string /* keep-id */);
     callback close-right-tabs(string /* from-id */);
     callback close-all-tabs();
+    callback duplicate-tab(string /* tab-id */);
     // Asks Rust to recompute the sidebar (status + resources) for whatever tab
     // is now active.  Fired on every active-tab change, UI- or code-driven.
     callback refresh-sidebar();
@@ -658,6 +661,25 @@ export component AppWindow inherits Window {
     callback term-select-update(string /* tab-id */, int /* row */, int /* col */);
     callback term-select-end(string /* tab-id */);
     callback term-select-autoscroll(string /* tab-id */, int /* dir */);
+
+    // Global hotkey handler (fallback when no terminal is focused).
+    FocusScope {
+        key-pressed(e) => {
+            if (!e.modifiers.control) { return reject; }
+            let k = e.text.to-lowercase();
+            if (root.hotkey-new-tab != "" && k == root.hotkey-new-tab) {
+                root.new-tab-clicked(); accept
+            } else if (root.hotkey-close-tab != "" && k == root.hotkey-close-tab) {
+                root.tab-closed(root.active-tab-id); accept
+            } else if (root.hotkey-toggle-sidebar != "" && k == root.hotkey-toggle-sidebar) {
+                root.sidebar-collapsed = !root.sidebar-collapsed; accept
+            } else if (root.hotkey-new-session != "" && k == root.hotkey-new-session) {
+                root.new-session-clicked(); accept
+            } else if (root.hotkey-settings != "" && k == root.hotkey-settings) {
+                root.settings-open = true; accept
+            } else { reject }
+        }
+    }
 
     VerticalLayout {
         spacing: 0;
@@ -742,6 +764,7 @@ export component AppWindow inherits Window {
             conn-state: root.conn-state;
             resource-title: root.resource-title;
             cpu-percent: root.cpu-percent;
+            cpu-detail: root.cpu-detail;
             mem-percent: root.mem-percent;
             swap-percent: root.swap-percent;
             mem-detail: root.mem-detail;
@@ -871,9 +894,11 @@ export component AppWindow inherits Window {
                         root.tab-selected(id);
                     }
                     tab-closed(id) => { root.tab-closed(id); }
+                    close-tab(id) => { root.tab-closed(id); }
                     close-other-tabs(id) => { root.close-other-tabs(id); }
                     close-right-tabs(id) => { root.close-right-tabs(id); }
                     close-all-tabs() => { root.close-all-tabs(); }
+                    duplicate-tab(id) => { root.duplicate-tab(id); }
                     new-tab() => { root.new-tab-clicked(); }
                 }
             }
@@ -941,6 +966,18 @@ export component AppWindow inherits Window {
                     sftp-loading: term.sftp-loading;
                     sftp-tree-nodes: term.sftp-tree-nodes;
                     sftp-selected-count: term.sftp-selected-count;
+                    hotkey-new-tab: root.hotkey-new-tab;
+                    hotkey-close-tab: root.hotkey-close-tab;
+                    hotkey-toggle-sidebar: root.hotkey-toggle-sidebar;
+                    hotkey-new-session: root.hotkey-new-session;
+                    hotkey-settings: root.hotkey-settings;
+                    trigger-hotkey(action) => {
+                        if (action == "new-tab") { root.new-tab-clicked(); }
+                        else if (action == "close-tab") { root.tab-closed(root.active-tab-id); }
+                        else if (action == "toggle-sidebar") { root.sidebar-collapsed = !root.sidebar-collapsed; }
+                        else if (action == "new-session") { root.new-session-clicked(); }
+                        else if (action == "settings") { root.settings-open = true; }
+                    }
                     quick-commands: root.quick-commands;
                     command-history: root.command-history;
                     history-view: root.history-view;
@@ -1929,7 +1966,7 @@ export component AppWindow inherits Window {
             x: (parent.width - self.width) / 2;
             y: (parent.height - self.height) / 2;
             width: 460px;
-            height: 420px;
+            height: 560px;
             background: Theme.bg-panel;
             border-radius: Theme.radius-md;
             border-width: 1px;
@@ -1971,10 +2008,46 @@ export component AppWindow inherits Window {
                     placeholder-text: @tr("e.g. tail log");
                 }
                 Text { text: @tr("Group (optional)"); color: Theme.text-secondary; font-size: Theme.fs-sm; }
-                qcm-group-in := LineEdit {
-                    text <=> root.qcm-group;
-                    font-family: Theme.ui-font-family;
-                    placeholder-text: @tr("leave empty → default");
+                HorizontalLayout {
+                    spacing: 6px;
+                    qcm-group-drop := ComboBox {
+                        horizontal-stretch: 1;
+                        model: root.quick-groups;
+                        current-value: root.qcm-group;
+                    }
+                    Rectangle {
+                        width: 28px; height: 28px;
+                        border-radius: Theme.radius-sm;
+                        background: ng-ta.has-hover ? Theme.bg-hover : transparent;
+                        ng-ta := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { root.qcg-orig = ""; root.qcg-name = ""; root.qcg-open = true; }
+                        }
+                        Text {
+                            text: "\u{E145}"; font-family: "Material Icons";
+                            color: Theme.accent; font-size: Theme.fs-md;
+                            horizontal-alignment: center; vertical-alignment: center;
+                        }
+                    }
+                    Rectangle {
+                        width: 28px; height: 28px;
+                        border-radius: Theme.radius-sm;
+                        background: dg-ta.has-hover && root.qcm-group != "default" && root.qcm-group != "" ? Theme.bg-hover : transparent;
+                        dg-ta := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => {
+                                if (root.qcm-group != "default" && root.qcm-group != "") {
+                                    root.delete-quick-group(root.qcm-group);
+                                }
+                            }
+                        }
+                        Text {
+                            text: "\u{E872}"; font-family: "Material Icons";
+                            color: root.qcm-group != "default" && root.qcm-group != "" ? #cc3333 : Theme.text-muted;
+                            font-size: Theme.fs-md;
+                            horizontal-alignment: center; vertical-alignment: center;
+                        }
+                    }
                 }
                 Text { text: @tr("Command"); color: Theme.text-secondary; font-size: Theme.fs-sm; }
                 HorizontalLayout {
@@ -2048,11 +2121,13 @@ export component AppWindow inherits Window {
                             // Group header on the first row of each group (#55).
                             // Right-click to rename / delete (empty) / new group.
                             if q.group-header != "" : Rectangle {
-                                height: 26px;
+                                height: 28px;
+                                border-radius: Theme.radius-sm;
+                                background: Theme.bg-root;
                                 property <length> gmx;
                                 property <length> gmy;
                                 HorizontalLayout {
-                                    padding-left: 4px; padding-top: 6px; spacing: 4px;
+                                    padding-left: 6px; spacing: 4px;
                                     Text { text: "\u{E2C7}"; font-family: "Material Icons";
                                            color: Theme.text-muted; font-size: Theme.fs-sm; vertical-alignment: center; }
                                     Text { text: q.group; color: Theme.text-muted; font-size: Theme.fs-xs;
@@ -2122,7 +2197,7 @@ export component AppWindow inherits Window {
                                     }
                                 }
                                 HorizontalLayout {
-                                    padding-left: 8px; padding-right: 6px; spacing: 6px;
+                                    padding-left: 20px; padding-right: 6px; spacing: 6px;
                                     VerticalLayout {
                                         horizontal-stretch: 1;
                                         alignment: center;
@@ -2144,6 +2219,27 @@ export component AppWindow inherits Window {
                                         Text { text: "\u{E872}"; font-family: "Material Icons";
                                                color: Theme.danger; font-size: Theme.fs-md;
                                                horizontal-alignment: center; vertical-alignment: center; }
+                                        if del-ta.has-hover : Rectangle {
+                                            y: parent.height + 5px;
+                                            x: parent.width - self.width;
+                                            width: tip-txt.preferred-width + 16px;
+                                            height: 22px;
+                                            background: Theme.bg-elevated;
+                                            border-radius: Theme.radius-sm;
+                                            border-width: 1px;
+                                            border-color: Theme.border-strong;
+                                            drop-shadow-blur: 8px;
+                                            drop-shadow-color: #00000070;
+                                            tip-txt := Text {
+                                                text: root.lang-en ? "Delete command" : "删除命令";
+                                                color: Theme.text-primary;
+                                                font-size: Theme.fs-xs;
+                                                horizontal-alignment: center;
+                                                vertical-alignment: center;
+                                                width: parent.width;
+                                                height: parent.height;
+                                            }
+                                        }
                                     }
                                 }
                                 qctx-menu := PopupWindow {
@@ -2510,51 +2606,63 @@ export component AppWindow inherits Window {
             drop-shadow-color: #000000a0;
             TouchArea {}
 
-            VerticalLayout {
-                padding: 18px;
-                spacing: 5px;
+            Flickable {
+                viewport-height: sc-content.preferred-height;
+                sc-content := VerticalLayout {
+                    padding: 18px;
+                    spacing: 5px;
 
-                HorizontalLayout {
-                    Text {
-                        text: root.lang-en ? "Keyboard shortcuts" : "快捷键";
-                        color: Theme.text-primary;
-                        font-size: Theme.fs-lg;
-                        font-weight: 700;
-                        horizontal-stretch: 1;
-                        vertical-alignment: center;
-                    }
-                    Rectangle {
-                        width: 22px; height: 22px;
-                        border-radius: Theme.radius-sm;
-                        background: sc-close.has-hover ? Theme.bg-hover : transparent;
-                        sc-close := TouchArea {
-                            mouse-cursor: pointer;
-                            clicked => { root.shortcuts-open = false; }
+                    HorizontalLayout {
+                        Text {
+                            text: root.lang-en ? "Keyboard shortcuts" : "快捷键";
+                            color: Theme.text-primary;
+                            font-size: Theme.fs-lg;
+                            font-weight: 700;
+                            horizontal-stretch: 1;
+                            vertical-alignment: center;
                         }
-                        Text { text: "\u{E5CD}"; font-family: "Material Icons";
-                               color: Theme.text-secondary; font-size: Theme.fs-sm;
-                               horizontal-alignment: center; vertical-alignment: center; }
+                        Rectangle {
+                            width: 22px; height: 22px;
+                            border-radius: Theme.radius-sm;
+                            background: sc-close.has-hover ? Theme.bg-hover : transparent;
+                            sc-close := TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => { root.shortcuts-open = false; }
+                            }
+                            Text { text: "\u{E5CD}"; font-family: "Material Icons";
+                                   color: Theme.text-secondary; font-size: Theme.fs-sm;
+                                   horizontal-alignment: center; vertical-alignment: center; }
+                        }
                     }
+
+                    Text { text: root.lang-en ? "Global shortcuts" : "窗口快捷键";
+                           color: Theme.text-muted; font-size: Theme.fs-xs; }
+                    ShortcutRow { keys: "Ctrl+T"; desc: root.lang-en ? "New tab" : "新标签"; }
+                    ShortcutRow { keys: "Ctrl+W"; desc: root.lang-en ? "Close tab" : "关闭标签"; }
+                    ShortcutRow { keys: "Ctrl+B"; desc: root.lang-en ? "Toggle sidebar" : "切换侧栏"; }
+                    ShortcutRow { keys: "Ctrl+N"; desc: root.lang-en ? "New session" : "新会话"; }
+                    ShortcutRow { keys: "Ctrl+,"; desc: root.lang-en ? "Settings" : "设置"; }
+
+                    Rectangle { height: 6px; }
+                    Text { text: root.lang-en ? "Terminal" : "终端";
+                           color: Theme.text-muted; font-size: Theme.fs-xs; }
+                    ShortcutRow { keys: "Ctrl+Shift+C"; desc: root.lang-en ? "Copy selection" : "复制选中内容"; }
+                    ShortcutRow { keys: "Ctrl+V"; desc: root.lang-en ? "Paste" : "粘贴"; }
+                    ShortcutRow { keys: root.lang-en ? "Drag" : "鼠标拖动"; desc: root.lang-en ? "Select text" : "选择文本"; }
+                    ShortcutRow { keys: root.lang-en ? "Wheel / Scrollbar" : "滚轮 / 滚动条"; desc: root.lang-en ? "Scroll history" : "滚动历史"; }
+
+                    Rectangle { height: 6px; }
+                    Text { text: root.lang-en ? "Command box" : "命令输入框";
+                           color: Theme.text-muted; font-size: Theme.fs-xs; }
+                    ShortcutRow { keys: "Enter"; desc: root.lang-en ? "Send command" : "发送命令"; }
+                    ShortcutRow { keys: "↑ / ↓"; desc: root.lang-en ? "Previous / next in history" : "上一条 / 下一条历史"; }
+                    ShortcutRow { keys: "Ctrl+A"; desc: root.lang-en ? "Move to start of line" : "移到行首"; }
+                    ShortcutRow { keys: "Ctrl+E"; desc: root.lang-en ? "Move to end of line" : "移到行尾"; }
+                    ShortcutRow { keys: "Ctrl+K"; desc: root.lang-en ? "Delete to end of line" : "删除到行尾"; }
+                    ShortcutRow { keys: "Ctrl+U"; desc: root.lang-en ? "Delete to start of line" : "删除到行首"; }
+
+                    Rectangle { vertical-stretch: 1; }
                 }
-
-                Text { text: root.lang-en ? "Terminal" : "终端";
-                       color: Theme.text-muted; font-size: Theme.fs-xs; }
-                ShortcutRow { keys: "Ctrl+Shift+C"; desc: root.lang-en ? "Copy selection" : "复制选中内容"; }
-                ShortcutRow { keys: "Ctrl+V"; desc: root.lang-en ? "Paste" : "粘贴"; }
-                ShortcutRow { keys: root.lang-en ? "Drag" : "鼠标拖动"; desc: root.lang-en ? "Select text" : "选择文本"; }
-                ShortcutRow { keys: root.lang-en ? "Wheel / Scrollbar" : "滚轮 / 滚动条"; desc: root.lang-en ? "Scroll history" : "滚动历史"; }
-
-                Rectangle { height: 6px; }
-                Text { text: root.lang-en ? "Command box" : "命令输入框";
-                       color: Theme.text-muted; font-size: Theme.fs-xs; }
-                ShortcutRow { keys: "Enter"; desc: root.lang-en ? "Send command" : "发送命令"; }
-                ShortcutRow { keys: "↑ / ↓"; desc: root.lang-en ? "Previous / next in history" : "上一条 / 下一条历史"; }
-                ShortcutRow { keys: "Ctrl+A"; desc: root.lang-en ? "Move to start of line" : "移到行首"; }
-                ShortcutRow { keys: "Ctrl+E"; desc: root.lang-en ? "Move to end of line" : "移到行尾"; }
-                ShortcutRow { keys: "Ctrl+K"; desc: root.lang-en ? "Delete to end of line" : "删除到行尾"; }
-                ShortcutRow { keys: "Ctrl+U"; desc: root.lang-en ? "Delete to start of line" : "删除到行首"; }
-
-                Rectangle { vertical-stretch: 1; }
             }
         }
     }

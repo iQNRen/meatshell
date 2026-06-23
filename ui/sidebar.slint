@@ -31,7 +31,8 @@ component StatRow inherits HorizontalLayout {
         overflow: elide;
     }
 
-    // Progress bar — stretches to fill the row, with a floor so it stays usable.
+    // Progress bar — stretches to fill the row.
+    // Fill bar width is proportional to percent; detail text floats on top at right edge.
     Rectangle {
         background: Theme.bg-root;
         border-radius: 2px;
@@ -56,17 +57,16 @@ component StatRow inherits HorizontalLayout {
             vertical-alignment: center;
             height: parent.height;
         }
-    }
 
-    // Used/total figure, right-aligned; reserve width so it never gets clipped.
-    Text {
-        text: detail;
-        color: Theme.text-muted;
-        font-size: Theme.fs-xs;
-        horizontal-stretch: 1;
-        min-width: 64px;
-        horizontal-alignment: right;
-        vertical-alignment: center;
+        Text {
+            text: detail;
+            color: Theme.text-muted;
+            font-size: Theme.fs-xs;
+            height: parent.height;
+            vertical-alignment: center;
+            width: parent.width - 6px;
+            horizontal-alignment: right;
+        }
     }
 }
 
@@ -243,6 +243,27 @@ component StatusBlock inherits Rectangle {
                 Text { text: "\u{E2C7}"; font-family: "Material Icons";
                        font-size: 14px; color: Theme.text-secondary;
                        horizontal-alignment: center; vertical-alignment: center; }
+if tg-ta.has-hover : Rectangle {
+                        y: parent.height + 5px;
+                        x: parent.width - self.width;
+                        width: tg-tip.preferred-width + 16px;
+                        height: 22px;
+                        background: Theme.bg-elevated;
+                        border-radius: Theme.radius-sm;
+                        border-width: 1px;
+                        border-color: Theme.border-strong;
+                        drop-shadow-blur: 8px;
+                        drop-shadow-color: #00000070;
+                        tg-tip := Text {
+                        text: @tr("Toggle files");
+                        color: Theme.text-primary;
+                        font-size: Theme.fs-xs;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                        width: parent.width;
+                        height: parent.height;
+                    }
+                }
             }
             // Collapse button — sits in front of the drag grip so it takes the click.
             Rectangle {
@@ -254,6 +275,27 @@ component StatusBlock inherits Rectangle {
                 Text { text: root.collapse-icon; font-family: "Material Icons";
                        font-size: 14px; color: Theme.text-secondary;
                        horizontal-alignment: center; vertical-alignment: center; }
+if cl-ta.has-hover : Rectangle {
+                        y: parent.height + 5px;
+                        x: parent.width - self.width;
+                        width: cl-tip.preferred-width + 16px;
+                        height: 22px;
+                        background: Theme.bg-elevated;
+                        border-radius: Theme.radius-sm;
+                        border-width: 1px;
+                        border-color: Theme.border-strong;
+                        drop-shadow-blur: 8px;
+                        drop-shadow-color: #00000070;
+                        cl-tip := Text {
+                        text: @tr("Collapse sidebar");
+                        color: Theme.text-primary;
+                        font-size: Theme.fs-xs;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                        width: parent.width;
+                        height: parent.height;
+                    }
+                }
             }
         }
         HorizontalLayout {
@@ -266,7 +308,7 @@ component StatusBlock inherits Rectangle {
                 horizontal-stretch: 1;
                 vertical-alignment: center;
             }
-            // 复制图标，点击复制连接地址
+            // Copy connection address to clipboard.
             if root.conn-state == 1 : Rectangle {
                 width: 20px;
                 height: 18px;
@@ -284,6 +326,27 @@ component StatusBlock inherits Rectangle {
                     mouse-cursor: pointer;
                     clicked => { root.copy-text(root.host-ip); }
                 }
+if conn-touch.has-hover : Rectangle {
+                        y: parent.height + 5px;
+                        x: parent.width - self.width;
+                        width: conn-tip.preferred-width + 16px;
+                        height: 22px;
+                        background: Theme.bg-elevated;
+                        border-radius: Theme.radius-sm;
+                        border-width: 1px;
+                        border-color: Theme.border-strong;
+                        drop-shadow-blur: 8px;
+                        drop-shadow-color: #00000070;
+                        conn-tip := Text {
+                        text: @tr("Copy address");
+                        color: Theme.text-primary;
+                        font-size: Theme.fs-xs;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                        width: parent.width;
+                        height: parent.height;
+                    }
+                }
             }
         }
     }
@@ -294,6 +357,7 @@ component StatsBlock inherits VerticalLayout {
     in property <string> resource-title;
     in property <bool> proc-available;
     in property <float> cpu-percent;
+    in property <string> cpu-detail;
     in property <float> mem-percent;
     in property <float> swap-percent;
     in property <string> mem-detail;
@@ -313,7 +377,7 @@ component StatsBlock inherits VerticalLayout {
                    horizontal-alignment: center; vertical-alignment: center; }
         }
     }
-    StatRow { label: "CPU"; percent: root.cpu-percent; detail: ""; bar-color: Theme.accent; }
+    StatRow { label: "CPU"; percent: root.cpu-percent; detail: root.cpu-detail; bar-color: Theme.accent; }
     StatRow { label: @tr("Memory"); percent: root.mem-percent; detail: root.mem-detail; bar-color: Theme.success; }
     StatRow { label: @tr("Swap"); percent: root.swap-percent; detail: root.swap-detail; bar-color: Theme.warning; }
 }
@@ -363,6 +427,9 @@ component DiskBlock inherits Rectangle {
                 spacing: 1px;
                 for d[i] in root.disks : Rectangle {
                     height: 20px; border-radius: 2px; clip: true;
+                    background: d.percent > 0.9 ? Theme.danger.with-alpha(0.32)
+                              : d.percent > 0.75 ? Theme.warning.with-alpha(0.30)
+                              : Theme.accent.with-alpha(0.22);
                     ta := TouchArea {
                         changed has-hover => {
                             if (self.has-hover) {
@@ -372,15 +439,8 @@ component DiskBlock inherits Rectangle {
                             }
                         }
                     }
-                    Rectangle {
-                        x: 0; y: 0; height: parent.height;
-                        width: parent.width * clamp(d.percent, 0.0, 1.0);
-                        background: d.percent > 0.9 ? Theme.danger.with-alpha(0.32)
-                                  : d.percent > 0.75 ? Theme.warning.with-alpha(0.30)
-                                  : Theme.accent.with-alpha(0.22);
-                    }
                     HorizontalLayout {
-                        padding-left: 6px; padding-right: 6px; spacing: 4px;
+                        padding-left: 6px; padding-right: 0px; spacing: 4px;
                         Text { text: d.path; color: Theme.text-secondary; font-size: Theme.fs-xs;
                                vertical-alignment: center; horizontal-stretch: 1; overflow: elide; }
                         Text { text: d.detail; color: Theme.text-muted; font-size: Theme.fs-xs;
@@ -409,6 +469,7 @@ export component Sidebar inherits Rectangle {
     in property <int> conn-state;                    // 0 gray / 1 green / 2 yellow
     in property <string> resource-title: @tr("Local resources");
     in property <float> cpu-percent;
+    in property <string> cpu-detail;
     in property <float> mem-percent;
     in property <float> swap-percent;
     in property <string> mem-detail;
@@ -486,17 +547,17 @@ export component Sidebar inherits Rectangle {
     if !root.lay-horizontal : VerticalLayout {
         padding: 10px;
         spacing: 10px;
-        StatusBlock {
-            conn-state: root.conn-state;
-            connection-state: root.connection-state;
-            host-ip: root.host-ip;
-            collapse-icon: root.collapse-icon;
-            dock-drag-move(x, y) => { root.dock-drag-move(x, y); }
-            dock-drag-end() => { root.dock-drag-end(); }
-            collapse() => { root.toggle-collapse(); }
-            copy-text(t) => { root.copy-text(t); }
-            toggle-position() => { root.fb-toggle-position(); }
-        }
+            StatusBlock {
+                conn-state: root.conn-state;
+                connection-state: root.connection-state;
+                host-ip: root.host-ip;
+                collapse-icon: root.collapse-icon;
+                dock-drag-move(x, y) => { root.dock-drag-move(x, y); }
+                dock-drag-end() => { root.dock-drag-end(); }
+                collapse() => { root.toggle-collapse(); }
+                copy-text(t) => { root.copy-text(t); }
+                toggle-position() => { root.fb-toggle-position(); }
+            }
 
         if root.fb-position == "sidebar" : VerticalLayout {
             spacing: 0;
@@ -526,7 +587,7 @@ export component Sidebar inherits Rectangle {
             StatsBlock {
                 resource-title: root.resource-title; proc-available: root.proc-available;
                 cpu-percent: root.cpu-percent; mem-percent: root.mem-percent; swap-percent: root.swap-percent;
-                mem-detail: root.mem-detail; swap-detail: root.swap-detail;
+                cpu-detail: root.cpu-detail; mem-detail: root.mem-detail; swap-detail: root.swap-detail;
                 show-processes() => { root.show-processes(); }
             }
             Rectangle { height: 1px; background: Theme.border-subtle; }
@@ -550,18 +611,18 @@ export component Sidebar inherits Rectangle {
             alignment: start;
             spacing: 8px;
             min-width: 200px;
-            StatusBlock {
-                conn-state: root.conn-state;
-                connection-state: root.connection-state;
-                host-ip: root.host-ip;
-                collapse-icon: root.collapse-icon;
-                dock-drag-move(x, y) => { root.dock-drag-move(x, y); }
-                dock-drag-end() => { root.dock-drag-end(); }
-                collapse() => { root.toggle-collapse(); }
-                copy-text(t) => { root.copy-text(t); }
-                toggle-position() => { root.fb-toggle-position(); }
-            }
-            if root.fb-position != "sidebar" : StatsBlock {
+        StatusBlock {
+            conn-state: root.conn-state;
+            connection-state: root.connection-state;
+            host-ip: root.host-ip;
+            collapse-icon: root.collapse-icon;
+            dock-drag-move(x, y) => { root.dock-drag-move(x, y); }
+            dock-drag-end() => { root.dock-drag-end(); }
+            collapse() => { root.toggle-collapse(); }
+            copy-text(t) => { root.copy-text(t); }
+            toggle-position() => { root.fb-toggle-position(); }
+        }
+        if root.fb-position != "sidebar" : StatsBlock {
                 resource-title: root.resource-title; proc-available: root.proc-available;
                 cpu-percent: root.cpu-percent; mem-percent: root.mem-percent; swap-percent: root.swap-percent;
                 mem-detail: root.mem-detail; swap-detail: root.swap-detail;

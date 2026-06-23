@@ -2,23 +2,27 @@ import { Theme } from "theme.slint";
 
 // --- IconButton ------------------------------------------------------------
 // A small square action button that accepts a single-character glyph (or short text).
-// Keeps visual language consistent across the app.
+// Keeps visual language consistent across the app. Shows a tooltip on hover
+// when the `tooltip` property is non-empty.
 export component IconButton inherits Rectangle {
     in property <string> glyph;
     in property <string> tooltip;
     in property <length> size: 28px;
     in property <brush> fg: Theme.text-secondary;
     in property <brush> fg-hover: Theme.text-primary;
+    in property <brush> bg-hover: Theme.bg-hover;
+    in property <string> font-family: "";
     callback clicked();
 
     width: size;
     height: size;
     border-radius: Theme.radius-sm;
-    background: touch.has-hover ? Theme.bg-hover : transparent;
+    background: touch.has-hover ? bg-hover : transparent;
     animate background { duration: 120ms; }
 
     Text {
         text: glyph;
+        font-family: root.font-family;
         color: touch.has-hover ? fg-hover : fg;
         font-size: Theme.fs-md;
         horizontal-alignment: center;
@@ -28,6 +32,29 @@ export component IconButton inherits Rectangle {
     touch := TouchArea {
         mouse-cursor: pointer;
         clicked => { root.clicked(); }
+    }
+
+    // Tooltip — shown on hover, right-aligned to the icon's right edge.
+    if touch.has-hover && root.tooltip != "" : Rectangle {
+        y: parent.height + 5px;
+        x: parent.width - self.width;
+        width: tip-txt.preferred-width + 16px;
+        height: 22px;
+        background: Theme.bg-elevated;
+        border-radius: Theme.radius-sm;
+        border-width: 1px;
+        border-color: Theme.border-strong;
+        drop-shadow-blur: 8px;
+        drop-shadow-color: #00000070;
+        tip-txt := Text {
+            text: root.tooltip;
+            color: Theme.text-primary;
+            font-size: Theme.fs-xs;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+            width: parent.width;
+            height: parent.height;
+        }
     }
 }
 

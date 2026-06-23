@@ -514,7 +514,7 @@ async fn run_sftp(
                 let cancels_done = cancels.clone();
                 tokio::spawn(async move {
                     let n = names.len();
-                    let tmp = format!("/tmp/meatshell-{}.tar", Uuid::new_v4());
+                    let tmp = format!("/tmp/rusterm-{}.tar", Uuid::new_v4());
                     // Name the archive after the first item's stem, per the user:
                     // 11.txt → "11等文件.tar". Sanitize since names come from the server.
                     let first = names.first().map(|s| s.as_str()).unwrap_or("download");

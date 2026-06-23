@@ -11,6 +11,7 @@ use sysinfo::{Disks, Networks, System};
 #[derive(Debug, Clone, Default)]
 pub struct SystemSnapshot {
     pub cpu_percent: f32,
+    pub cpu_count: u32,
     pub mem_percent: f32,
     pub swap_percent: f32,
     pub mem_used_mib: u64,
@@ -63,6 +64,7 @@ impl SystemSampler {
         self.nets.refresh(true);
 
         let cpu_percent = self.sys.global_cpu_usage() / 100.0;
+        let cpu_count = self.sys.cpus().len() as u32;
 
         let mem_total = self.sys.total_memory();
         let mem_used = self.sys.used_memory();
@@ -110,6 +112,7 @@ impl SystemSampler {
 
         SystemSnapshot {
             cpu_percent,
+            cpu_count,
             mem_percent,
             swap_percent,
             mem_used_mib: mem_used / 1024 / 1024,
@@ -142,6 +145,12 @@ pub fn format_mem(used_mib: u64, total_mib: u64) -> String {
         }
     }
     format!("{}G/{}G", gib(used_mib), gib(total_mib))
+}
+
+/// CPU detail for the sidebar row on the right side of the bar.
+/// Shows load percentage and core count, e.g. `"45% · 8C"`.
+pub fn format_cpu_detail(load_pct: f32, cores: u32) -> String {
+    format!("{:.0}% · {}C", load_pct * 100.0, cores)
 }
 
 /// Human-readable network throughput (e.g. `"1.2 MB/s"`).

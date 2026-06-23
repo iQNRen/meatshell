@@ -387,6 +387,54 @@ msgstr "Confirm delete"
 msgid "Delete this item? This cannot be undone."
 msgstr "Delete this item? This cannot be undone."
 
+msgid "Search commands..."
+msgstr "Search commands..."
+
+msgid "Manage"
+msgstr "Manage"
+
+msgid "New Tab"
+msgstr "New Tab"
+
+msgid "Duplicate Tab"
+msgstr "Duplicate Tab"
+
+msgid "Paste path"
+msgstr "Paste path"
+
+msgid "Parent directory"
+msgstr "Parent directory"
+
+msgid "Download selected"
+msgstr "Download selected"
+
+msgid "Delete selected"
+msgstr "Delete selected"
+
+msgid "Expand panel"
+msgstr "Expand panel"
+
+msgid "Collapse panel"
+msgstr "Collapse panel"
+
+msgid "Toggle files"
+msgstr "Toggle files"
+
+msgid "Collapse sidebar"
+msgstr "Collapse sidebar"
+
+msgid "Copy address"
+msgstr "Copy address"
+
+msgid "Close tab"
+msgstr "Close tab"
+
+msgid "New tab"
+msgstr "New tab"
+
+msgid "Search history"
+msgstr "Search history"
+
 msgid "Please confirm"
 msgstr "Please confirm"
 

@@ -396,6 +396,54 @@ msgstr "确认删除"
 msgid "Delete this item? This cannot be undone."
 msgstr "确定删除此项？此操作不可撤销。"
 
+msgid "Search commands..."
+msgstr "搜索命令..."
+
+msgid "Manage"
+msgstr "管理"
+
+msgid "New Tab"
+msgstr "新建标签页"
+
+msgid "Duplicate Tab"
+msgstr "复制标签页"
+
+msgid "Paste path"
+msgstr "粘贴路径"
+
+msgid "Parent directory"
+msgstr "上级目录"
+
+msgid "Download selected"
+msgstr "下载选中项"
+
+msgid "Delete selected"
+msgstr "删除选中项"
+
+msgid "Expand panel"
+msgstr "展开面板"
+
+msgid "Collapse panel"
+msgstr "收起面板"
+
+msgid "Toggle files"
+msgstr "切换文件"
+
+msgid "Collapse sidebar"
+msgstr "收起侧栏"
+
+msgid "Copy address"
+msgstr "复制地址"
+
+msgid "Close tab"
+msgstr "关闭标签"
+
+msgid "New tab"
+msgstr "新建标签"
+
+msgid "Search history"
+msgstr "搜索历史"
+
 msgid "Please confirm"
 msgstr "请确认"
 

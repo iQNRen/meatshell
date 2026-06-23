@@ -37,7 +37,7 @@ fn id(host: &str, port: u16) -> String {
 /// Path to the known_hosts file (alongside sessions.json). `None` if the user
 /// config directory can't be determined.
 fn path() -> Option<PathBuf> {
-    let dirs = ProjectDirs::from("dev", "meatshell", "meatshell")?;
+    let dirs = ProjectDirs::from("dev", "rusterm", "rusterm")?;
     Some(dirs.config_dir().join("known_hosts"))
 }
 
