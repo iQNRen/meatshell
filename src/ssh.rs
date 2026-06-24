@@ -391,6 +391,10 @@ pub enum SessionEvent {
         edit: bool,
         error: String,
     },
+    /// Built-in editor save completed successfully.
+    EditorSaveCompleted(String),  // file name
+    /// Built-in editor save failed.
+    EditorSaveFailed(String, String),  // file name, error
 }
 
 /// Handle retained by the UI layer to talk to a running session.

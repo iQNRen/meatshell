@@ -3230,6 +3230,7 @@ fn apply_session_event_to_window(
             edit,
             error,
         } => {
+            win.set_editor_loading(false);
             if error.is_empty() {
                 // Open the built-in viewer/editor (#70).
                 win.set_editor_line_numbers(line_numbers_for(&content).into());
@@ -3240,25 +3241,26 @@ fn apply_session_event_to_window(
                 win.set_editor_dirty(false);
                 win.set_editor_open(true);
             } else {
-                // Couldn't open as text. The SFTP status line alone is easy to
-                // miss (looks like "nothing happened"), so also print the reason
-                // into the terminal via a synthetic Output event (#70).
-                apply_session_event_to_window(
-                    win,
-                    tab_id,
-                    SessionEvent::Output(format!(
-                        "\r\n[rusterm] {} {}: {}\r\n",
-                        crate::i18n::t("无法打开", "Cannot open"),
-                        name,
-                        error
-                    )),
-                    bufs,
-                    statuses,
-                    local,
-                    local_net_hist,
-                );
-                update_terminal(&|t| t.sftp_status = error.clone().into());
+                // Show error inside the editor itself instead of just the status line.
+                win.set_editor_error(error.clone().into());
+                win.set_editor_readonly(true);
+                win.set_editor_open(true);
             }
+        }
+        SessionEvent::EditorSaveCompleted(name) => {
+            win.set_editor_dirty(false);
+            win.set_editor_saving(false);
+            let msg = format!("{}: {}", crate::i18n::t("已保存", "Saved"), name);
+            win.set_toast_message(msg.into());
+            win.set_toast_type("success".into());
+            win.set_toast_open(true);
+        }
+        SessionEvent::EditorSaveFailed(name, err) => {
+            win.set_editor_saving(false);
+            let msg = format!("{}: {} - {}", crate::i18n::t("保存失败", "Save failed"), name, err);
+            win.set_toast_message(msg.into());
+            win.set_toast_type("error".into());
+            win.set_toast_open(true);
         }
         SessionEvent::SftpTreeUpdate(nodes) => {
             let slint_nodes: Vec<SftpTreeNode> = nodes
@@ -3946,9 +3948,20 @@ fn wire_sftp_callbacks(
     // text into the built-in editor instead of an external app (#70).
     {
         let sftp_handles = sftp_handles.clone();
+        let weak = window.as_weak();
         window.on_sftp_view(move |tab_id: SharedString, path: SharedString| {
             if let Ok(handles) = sftp_handles.lock() {
                 if let Some(h) = handles.get(tab_id.as_str()) {
+                    let Some(w) = weak.upgrade() else { return };
+                    let name = path.rsplit('/').next().unwrap_or(&path).to_string();
+                    w.set_editor_name(name.into());
+                    w.set_editor_path(path.to_string().into());
+                    w.set_editor_content("".into());
+                    w.set_editor_readonly(true);
+                    w.set_editor_dirty(false);
+                    w.set_editor_loading(true);
+                    w.set_editor_error("".into());
+                    w.set_editor_open(true);
                     h.read_text(path.to_string(), false);
                 }
             }
@@ -3956,9 +3969,20 @@ fn wire_sftp_callbacks(
     }
     {
         let sftp_handles = sftp_handles.clone();
+        let weak = window.as_weak();
         window.on_sftp_edit(move |tab_id: SharedString, path: SharedString| {
             if let Ok(handles) = sftp_handles.lock() {
                 if let Some(h) = handles.get(tab_id.as_str()) {
+                    let Some(w) = weak.upgrade() else { return };
+                    let name = path.rsplit('/').next().unwrap_or(&path).to_string();
+                    w.set_editor_name(name.into());
+                    w.set_editor_path(path.to_string().into());
+                    w.set_editor_content("".into());
+                    w.set_editor_readonly(false);
+                    w.set_editor_dirty(false);
+                    w.set_editor_loading(true);
+                    w.set_editor_error("".into());
+                    w.set_editor_open(true);
                     h.read_text(path.to_string(), true);
                 }
             }
@@ -4100,6 +4124,24 @@ fn wire_sftp_callbacks(
     {
         let sftp_handles = sftp_handles.clone();
         let weak = window.as_weak();
+        let weak_show = window.as_weak();
+        window.on_show_toast(move |msg: SharedString, ty: SharedString| {
+            if let Some(w) = weak_show.upgrade() {
+                w.set_toast_message(msg);
+                w.set_toast_type(ty);
+                w.set_toast_open(true);
+                // Auto-dismiss after 3s
+                let weak2 = w.as_weak();
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_secs(3));
+                    let _ = slint::invoke_from_event_loop(move || {
+                        if let Some(w2) = weak2.upgrade() {
+                            w2.set_toast_open(false);
+                        }
+                    });
+                });
+            }
+        });
         window.on_save_file(move || {
             let Some(w) = weak.upgrade() else { return };
             if w.get_editor_readonly() {
@@ -4110,10 +4152,10 @@ fn wire_sftp_callbacks(
             let tab_id = w.get_active_tab_id().to_string();
             if let Ok(handles) = sftp_handles.lock() {
                 if let Some(h) = handles.get(&tab_id) {
+                    w.set_editor_saving(true);
                     h.write_text(path, content);
                 }
             }
-            w.set_editor_dirty(false);
         });
     }
     // Close the editor; in edit mode upload first if there are unsaved edits.

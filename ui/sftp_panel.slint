@@ -686,7 +686,7 @@ export component SftpPanel inherits Rectangle {
                                         if (entry.is-dir) {
                                             root.navigate(entry.full-path);
                                         } else {
-                                            root.download(entry.full-path);
+                                            root.edit(entry.full-path);
                                         }
                                     }
                                     pointer-event(ev) => {

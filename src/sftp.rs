@@ -865,12 +865,17 @@ async fn run_sftp(
                             t("已保存", "Saved"),
                             name
                         )));
+                        let _ = events.send(SessionEvent::EditorSaveCompleted(name));
                     }
                     Err(e) => {
                         let _ = events.send(SessionEvent::SftpStatus(format!(
                             "{}: {e:#}",
                             t("保存失败", "Save failed")
                         )));
+                        let _ = events.send(SessionEvent::EditorSaveFailed(
+                            name,
+                            format!("{e:#}"),
+                        ));
                     }
                 }
             }

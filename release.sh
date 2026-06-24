@@ -37,6 +37,7 @@ else
   echo "未检测到代理，直连推送"
 fi
 
+# git push --force-with-lease origin rusterm
 # 推送（失败时回滚）
 if git -c "http.proxy=$PROXY" -c "http.version=HTTP/1.1" push origin rusterm && \
    git -c "http.proxy=$PROXY" -c "http.version=HTTP/1.1" push origin "v$NEW"; then

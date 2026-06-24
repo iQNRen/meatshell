@@ -506,10 +506,20 @@ export component AppWindow inherits Window {
     in-out property <string> editor-content;  // text, two-way with the input
     in-out property <bool> editor-readonly;   // view = true, edit = false
     in-out property <bool> editor-dirty: false; // edited since load
+    in-out property <bool> editor-loading: false; // async read in progress
+    in-out property <bool> editor-saving: false;  // async save in progress
+    in-out property <string> editor-error: "";    // last error message
+    in-out property <bool> editor-confirm-close: false; // dirty close confirm
     in-out property <string> editor-line-numbers; // newline-joined "1..N" from Rust (#81)
     callback save-file();                     // Ctrl+S / Save button (edit only)
     callback close-editor();                  // X / Esc; uploads if dirty
     callback editor-recount(string);          // rebuild line numbers after an edit
+
+    // --- Toast notification -------------------------------------------------
+    in-out property <bool> toast-open: false;
+    in property <string> toast-message: "";
+    in property <string> toast-type: "info";   // "success" | "error" | "info"
+    callback show-toast(string, string);        // (message, type)
     // Editor card geometry: draggable by its title bar, resizable from the
     // bottom-right grip (same absolute-position pattern as the Interface
     // dialog). Defaults centre the card; user drags/resizes override them.
@@ -1284,6 +1294,43 @@ export component AppWindow inherits Window {
         }
     }
 
+    // --- Toast notification overlay -----------------------------------------
+    if root.toast-open : Rectangle {
+        x: parent.width - 340px;
+        y: parent.height - 70px;
+        width: 310px;
+        height: 46px;
+        background: root.toast-type == "error" ? #d32f2f : root.toast-type == "success" ? #2e7d32 : #1565c0;
+        border-radius: Theme.radius-sm;
+        drop-shadow-blur: 12px;
+        drop-shadow-color: #00000060;
+        TouchArea { clicked => { root.toast-open = false; } }
+        animate opacity { duration: 200ms; }
+        HorizontalLayout {
+            padding: 12px;
+            spacing: 8px;
+            Text {
+                text: root.toast-message;
+                color: #ffffff;
+                font-size: Theme.fs-sm;
+                font-family: Theme.ui-font-family;
+                vertical-alignment: center;
+                horizontal-stretch: 1;
+                overflow: elide;
+            }
+            Text {
+                text: "\u{E5CD}"; font-family: "Material Icons";
+                color: #ffffffcc; font-size: 16px;
+                vertical-alignment: center;
+                TouchArea {
+                    width: 22px; height: 22px;
+                    mouse-cursor: pointer;
+                    clicked => { root.toast-open = false; }
+                }
+            }
+        }
+    }
+
     // --- Built-in file viewer / editor (#70) ------------------------------
     // View = read-only (selectable/copyable); Edit = writable, Ctrl+S or the
     // Save button uploads, and closing uploads any unsaved changes.
@@ -1292,6 +1339,7 @@ export component AppWindow inherits Window {
         // stray click) — use the close button or Esc. Also swallow wheel events
         // so scrolling can't leak through to the terminal underneath (#70).
         background: #00000088;
+        animate opacity { duration: 150ms; }
         TouchArea {
             scroll-event(event) => { accept }
         }
@@ -1304,7 +1352,11 @@ export component AppWindow inherits Window {
                     return accept;
                 }
                 if (e.text == Key.Escape) {
-                    root.close-editor();
+                    if (root.editor-dirty && !root.editor-readonly) {
+                        root.editor-confirm-close = true;
+                    } else {
+                        root.close-editor();
+                    }
                     return accept;
                 }
                 return reject;
@@ -1321,6 +1373,7 @@ export component AppWindow inherits Window {
                 drop-shadow-blur: 24px;
                 drop-shadow-color: #00000080;
                 clip: true;
+                animate opacity { duration: 150ms; }
 
                 VerticalLayout {
                     // Title bar — drag to move; the buttons stay on top.
@@ -1357,10 +1410,14 @@ export component AppWindow inherits Window {
                             spacing: 8px;
                             Text {
                                 text: root.editor-name
-                                    + (root.editor-readonly
-                                        ? "  ·  " + @tr("Read-only")
-                                        : (root.editor-dirty ? "  ·  " + @tr("Modified") : ""));
-                                color: Theme.text-primary;
+                                    + (root.editor-loading
+                                        ? "  ·  " + @tr("Loading...")
+                                        : root.editor-readonly
+                                            ? "  ·  " + @tr("Read-only")
+                                            : root.editor-saving
+                                                ? "  ·  " + @tr("Saving...")
+                                                : root.editor-dirty ? "  ·  " + @tr("Modified") : "");
+                                color: root.editor-loading || root.editor-saving ? Theme.text-muted : Theme.text-primary;
                                 font-size: Theme.fs-md;
                                 font-weight: 600;
                                 font-family: Theme.ui-font-family;
@@ -1368,7 +1425,7 @@ export component AppWindow inherits Window {
                                 horizontal-stretch: 1;
                                 overflow: elide;
                             }
-                            if !root.editor-readonly : Rectangle {
+                            if !root.editor-readonly && !root.editor-loading && !root.editor-saving : Rectangle {
                                 width: 76px; height: 28px;
                                 border-radius: Theme.radius-sm;
                                 background: ed-save-ta.has-hover ? Theme.accent-hover : Theme.accent;
@@ -1385,7 +1442,13 @@ export component AppWindow inherits Window {
                                 background: ed-close-ta.has-hover ? Theme.bg-hover : transparent;
                                 ed-close-ta := TouchArea {
                                     mouse-cursor: pointer;
-                                    clicked => { root.close-editor(); }
+                                    clicked => {
+                                        if (root.editor-dirty && !root.editor-readonly) {
+                                            root.editor-confirm-close = true;
+                                        } else {
+                                            root.close-editor();
+                                        }
+                                    }
                                 }
                                 Text { text: "\u{E5CD}"; font-family: "Material Icons";
                                        color: Theme.text-secondary; font-size: Theme.fs-md;
@@ -1440,6 +1503,41 @@ export component AppWindow inherits Window {
                                 }
                             }
                         }
+                        // Loading overlay (while async content loads)
+                        if root.editor-loading && root.editor-content == "" : Rectangle {
+                            x: 0; y: 0;
+                            width: parent.width;
+                            height: parent.height;
+                            background: Theme.bg-root;
+                            animate opacity { duration: 200ms; }
+                            Text {
+                                text: @tr("Loading file...");
+                                color: Theme.text-muted;
+                                font-size: Theme.fs-md;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                                width: parent.width;
+                                height: parent.height;
+                            }
+                        }
+                        // Error message overlay (when open fails)
+                        if root.editor-error != "" && !root.editor-loading : Rectangle {
+                            x: 0; y: 0;
+                            width: parent.width;
+                            height: parent.height;
+                            background: Theme.bg-root;
+                            animate opacity { duration: 200ms; }
+                            Text {
+                                text: root.editor-error;
+                                color: #d32f2f;
+                                font-size: Theme.fs-md;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                                width: parent.width - 40px;
+                                height: parent.height;
+                                wrap: word-wrap;
+                            }
+                        }
                     }
                 }
 
@@ -1480,6 +1578,67 @@ export component AppWindow inherits Window {
             }
             // Focus the text the moment the editor opens.
             init => { edit-input.focus(); }
+        }
+    }
+
+    // --- Editor dirty-file close confirm dialog -----------------------------
+    if root.editor-confirm-close : Rectangle {
+        width: parent.width;
+        height: parent.height;
+        background: #00000088;
+        TouchArea { clicked => { root.editor-confirm-close = false; } }
+        Rectangle {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            width: 380px;
+            height: 180px;
+            background: Theme.bg-panel;
+            border-radius: Theme.radius-md;
+            border-width: 1px;
+            border-color: Theme.border-strong;
+            drop-shadow-blur: 24px;
+            drop-shadow-color: #000000a0;
+            TouchArea {}
+            VerticalLayout {
+                padding: 18px;
+                spacing: 12px;
+                Text {
+                    text: root.lang-en ? "Unsaved changes" : "未保存的更改";
+                    color: Theme.text-primary; font-size: Theme.fs-lg; font-weight: 700;
+                }
+                Text {
+                    text: root.lang-en
+                        ? "You have unsaved changes in " + root.editor-name + "."
+                        : "您在 " + root.editor-name + " 中有未保存的变更。";
+                    color: Theme.text-secondary; font-size: Theme.fs-sm; wrap: word-wrap;
+                }
+                Rectangle { vertical-stretch: 1; }
+                HorizontalLayout {
+                    alignment: end;
+                    spacing: 8px;
+                    Button {
+                        text: root.lang-en ? "Cancel" : "取消";
+                        clicked => { root.editor-confirm-close = false; }
+                    }
+                    Button {
+                        text: root.lang-en ? "Don't save" : "不保存";
+                        clicked => {
+                            root.editor-dirty = false;
+                            root.editor-confirm-close = false;
+                            root.close-editor();
+                        }
+                    }
+                    Button {
+                        text: root.lang-en ? "Save" : "保存";
+                        primary: true;
+                        clicked => {
+                            root.editor-confirm-close = false;
+                            root.save-file();
+                            root.close-editor();
+                        }
+                    }
+                }
+            }
         }
     }
 
